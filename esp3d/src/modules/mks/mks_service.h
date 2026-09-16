@@ -21,7 +21,7 @@
 #ifndef _MKS_SERVICES_H
 #define _MKS_SERVICES_H
 
-#define MKS_FRAME_SIZE 1024
+#define MKS_FRAME_SIZE 256
 #define MKS_FRAME_DATA_MAX_SIZE (MKS_FRAME_SIZE - 5 - 4)
 #include "../../core/esp3d_message.h"
 class MKSService {
@@ -58,6 +58,7 @@ class MKSService {
   static void clearFrame(uint start = 0);
   static bool canSendFrame();
   static void sendFrameDone();
+  static bool waitForUploadAck();
   static bool _started;
   static uint8_t _frame[MKS_FRAME_SIZE];
   static char _moduleId[22];

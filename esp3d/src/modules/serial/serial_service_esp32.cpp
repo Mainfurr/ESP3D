@@ -25,6 +25,9 @@
 #include "../../core/esp3d_settings.h"
 #include "../../core/esp3d_string.h"
 #include "../authentication/authentication_service.h"
+#if COMMUNICATION_PROTOCOL == RAW_SERIAL
+#include "../bft/binary_file_transfer_service.h"
+#endif  // COMMUNICATION_PROTOCOL == RAW_SERIAL
 #include "serial_service.h"
 
 #define SERIAL_COMMUNICATION_TIMEOUT 500
@@ -102,6 +105,12 @@ void ESP3DSerialService::receiveCb() {
       }
       //take the char
       count--;
+#if COMMUNICATION_PROTOCOL == RAW_SERIAL
+      if (_id == MAIN_SERIAL && BinaryFileTransferService::active()) {
+        BinaryFileTransferService::receiveByte((uint8_t)data);
+        continue;
+      }
+#endif  // COMMUNICATION_PROTOCOL == RAW_SERIAL
       _buffer[_buffer_size] = (uint8_t)data;
       //check what next step is
       if (esp3d_string::isRealTimeCommand(_buffer[_buffer_size])) {

@@ -25,6 +25,9 @@
 #include "../../core/esp3d_string.h"
 #include "serial_service.h"
 
+#if COMMUNICATION_PROTOCOL == RAW_SERIAL
+#include "../bft/binary_file_transfer_service.h"
+#endif  // COMMUNICATION_PROTOCOL == RAW_SERIAL
 #if COMMUNICATION_PROTOCOL == MKS_SERIAL
 #include "../mks/mks_service.h"
 #endif  // COMMUNICATION_PROTOCOL == MKS_SERIAL
@@ -150,6 +153,14 @@ void ESP3DSerialService::push2buffer(uint8_t *sbuf, size_t len) {
   if (!_started || !_buffer) {
     return;
   }
+#if COMMUNICATION_PROTOCOL == RAW_SERIAL
+  if (_id == MAIN_SERIAL && BinaryFileTransferService::active()) {
+    for (size_t i = 0; i < len; ++i) {
+      BinaryFileTransferService::receiveByte(sbuf[i]);
+    }
+    return;
+  }
+#endif  // COMMUNICATION_PROTOCOL == RAW_SERIAL
   esp3d_log("buffer get %d data ", len);
 #if COMMUNICATION_PROTOCOL == MKS_SERIAL
   static bool isFrameStarted = false;

@@ -28,6 +28,17 @@
 
 extern HardwareSerial *Serials[];
 
+namespace {
+#if defined(ARDUINO_ARCH_ESP32)
+portMUX_TYPE txMux = portMUX_INITIALIZER_UNLOCKED;
+void lockTx() { portENTER_CRITICAL(&txMux); }
+void unlockTx() { portEXIT_CRITICAL(&txMux); }
+#else
+void lockTx() { noInterrupts(); }
+void unlockTx() { interrupts(); }
+#endif
+}
+
 // Serial Parameters
 
 ESP3DSerialService esp3d_serial_service = ESP3DSerialService(MAIN_SERIAL);
@@ -102,6 +113,42 @@ void ESP3DSerialService::updateBaudRate(uint32_t br) {
 uint32_t ESP3DSerialService::baudRate() { return _baudRate; }
 
 size_t ESP3DSerialService::writeBytes(const uint8_t *buffer, size_t size) {
+  return writeGuarded(buffer, size, false);
+}
+
+bool ESP3DSerialService::claimExclusive() {
+  lockTx();
+  const bool allowed = _started && !_exclusive && !_writing;
+  if (allowed) _exclusive = true;
+  unlockTx();
+  return allowed;
+}
+
+void ESP3DSerialService::releaseExclusive() {
+  lockTx();
+  _exclusive = false;
+  unlockTx();
+}
+
+size_t ESP3DSerialService::writeExclusive(const uint8_t* buffer, size_t size) {
+  return writeGuarded(buffer, size, true);
+}
+
+size_t ESP3DSerialService::writeGuarded(const uint8_t* buffer, size_t size,
+                                     bool exclusive) {
+  lockTx();
+  const bool allowed = _started && !_writing && (_exclusive == exclusive);
+  if (allowed) _writing = true;
+  unlockTx();
+  if (!allowed) return 0;
+  const size_t sent = writeRaw(buffer, size);
+  lockTx();
+  _writing = false;
+  unlockTx();
+  return sent;
+}
+
+size_t ESP3DSerialService::writeRaw(const uint8_t *buffer, size_t size) {
   if (!_started) {
     return 0;
   }
@@ -136,6 +183,20 @@ size_t ESP3DSerialService::readBytes(uint8_t *sbuf, size_t len) {
     return -1;
   }
   return Serials[_serialIndex]->readBytes(sbuf, len);
+}
+
+int ESP3DSerialService::available() {
+  if (!_started) {
+    return 0;
+  }
+  return Serials[_serialIndex]->available();
+}
+
+int ESP3DSerialService::read() {
+  if (!_started) {
+    return -1;
+  }
+  return Serials[_serialIndex]->read();
 }
 
 void ESP3DSerialService::flush() {

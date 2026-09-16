@@ -115,6 +115,16 @@ uint32_t AuthenticationService::setSessionTimeout(uint32_t timeout) {
 uint32_t AuthenticationService::getSessionTimeout() { return _sessionTimeout; }
 #endif  // HTTP_FEATURE
 
+#if defined(HTTP_FEATURE)
+ESP3DAuthenticationLevel AuthenticationService::getAuthenticatedLevel(
+    IPAddress ip, const char* sessionID) {
+  if (sessionID == nullptr || sessionID[0] == '\0') {
+    return ESP3DAuthenticationLevel::guest;
+  }
+  return ResetAuthIP(ip, sessionID);
+}
+#endif  // HTTP_FEATURE
+
 bool AuthenticationService::begin() {
   end();
   update(); 

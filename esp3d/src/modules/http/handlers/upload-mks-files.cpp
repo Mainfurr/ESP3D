@@ -89,6 +89,9 @@ void HTTP_Server::MKSFileupload() {
       esp3d_log("Filename: %s Size:%d", filename.c_str(), fileSize);
       if (MKSService::sendFirstFragment(filename.c_str(), fileSize)) {
         MKSService::uploadMode();
+      } else {
+        _upload_status = UPLOAD_STATUS_FAILED;
+        pushError(ESP_ERROR_FILE_WRITE, "Printer rejected file header");
       }
     } else if (upload.status == UPLOAD_FILE_WRITE) {
       if (_upload_status == UPLOAD_STATUS_ONGOING) {

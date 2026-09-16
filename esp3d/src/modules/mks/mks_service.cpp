@@ -29,12 +29,6 @@
 #include "../wifi/wificonfig.h"
 #include "mks_service.h"
 
-// Flag Pins
-#define ESP_FLAG_PIN 0
-#define BOARD_FLAG_PIN 4
-// Flag pins values
-#define BOARD_READY_FLAG_VALUE LOW
-
 // Frame offsets
 #define MKS_FRAME_HEAD_OFFSET 0
 #define MKS_FRAME_TYPE_OFFSET 1
@@ -90,12 +84,9 @@
 
 #define NB_HOTSPOT_MAX 15
 
-// Timeouts
-#define FRAME_WAIT_TO_SEND_TIMEOUT 2000
-#define ACK_TIMEOUT 5000
 #define NET_FRAME_REFRESH_TIME 10000
 
-#define UPLOAD_BAUD_RATE 1958400
+#define MKS_UPLOAD_ACK_TIMEOUT 5000
 
 bool MKSService::_started = false;
 uint8_t MKSService::_frame[MKS_FRAME_SIZE] = {0};
@@ -128,9 +119,8 @@ bool MKSService::dispatch(ESP3DMessage *message) {
 }
 
 bool MKSService::begin() {
-  // setup the pins
-  pinMode(BOARD_FLAG_PIN, INPUT);
-  pinMode(ESP_FLAG_PIN, OUTPUT);
+  // ESP-01S has neither a spare GPIO4 nor a safe GPIO0.  MKS frames are sent
+  // over UART without the optional hardware ready/busy handshake.
   _started = true;
   // max size is 21
   sprintf(_moduleId, "HJNLM000%02X%02X%02X%02X%02X%02X", WiFi.macAddress()[0],
@@ -151,7 +141,7 @@ void MKSService::commandMode(bool fromSettings) {
 void MKSService::uploadMode() {
   esp3d_log("Upload Mode");
   _uploadMode = true;
-  esp3d_serial_service.updateBaudRate(UPLOAD_BAUD_RATE);
+  // Keep the UART at the command baud rate (115200 for this Marlin setup).
 }
 
 uint MKSService::getFragmentID(uint32_t fragmentNumber, bool isLast) {
@@ -167,6 +157,11 @@ uint MKSService::getFragmentID(uint32_t fragmentNumber, bool isLast) {
 
 bool MKSService::sendFirstFragment(const char *filename, size_t filesize) {
   uint fileNameLen = strlen(filename);
+  // Header, type, length, first-fragment metadata, and tail consume 10 bytes.
+  if (fileNameLen > (MKS_FRAME_SIZE - 10)) {
+    esp3d_log_e("Filename is too long for an MKS frame");
+    return false;
+  }
   uint dataLen = fileNameLen + 5;
   clearFrame();
   // Head Flag
@@ -197,7 +192,7 @@ bool MKSService::sendFirstFragment(const char *filename, size_t filesize) {
     if (esp3d_serial_service.writeBytes(_frame, dataLen + 5) == (dataLen + 5)) {
       esp3d_log("First fragment Ok");
       sendFrameDone();
-      return true;
+      return waitForUploadAck();
     }
   }
   esp3d_log("Failed");
@@ -239,7 +234,7 @@ bool MKSService::sendFragment(const uint8_t *dataFrame, const size_t dataSize,
         MKS_FRAME_SIZE) {
       esp3d_log("Ok");
       sendFrameDone();
-      return true;
+      return waitForUploadAck();
     }
     esp3d_log_e("Error with size sent");
   }
@@ -339,8 +334,7 @@ void MKSService::handleFrame(const uint8_t type, const uint8_t *dataFrame,
       break;
     // File transfer if not command
     case MKS_TYPE_TRANSFER:
-      // todo
-      esp3d_log("************MKS_TYPE_TRANSFER*************");
+      // Not used by the ESP3D MKS file uploader.
       break;
     // Error when doing transfer
     case MKS_TYPE_EXCEPTION:
@@ -501,22 +495,26 @@ void MKSService::messageWiFiConfig(const uint8_t *dataFrame,
 }
 
 bool MKSService::canSendFrame() {
-  esp3d_log("Is board ready for frame?");
-  digitalWrite(ESP_FLAG_PIN, BOARD_READY_FLAG_VALUE);
-  uint32_t startTime = millis();
-  while ((millis() - startTime) < FRAME_WAIT_TO_SEND_TIMEOUT) {
-    if (digitalRead(BOARD_FLAG_PIN) == BOARD_READY_FLAG_VALUE) {
-      esp3d_log("Yes");
-      return true;
+  return true;
+}
+
+void MKSService::sendFrameDone() {}
+
+bool MKSService::waitForUploadAck() {
+  const uint32_t startTime = millis();
+  _uploadStatus = UNKNOW_STATE;
+  while ((millis() - startTime) < MKS_UPLOAD_ACK_TIMEOUT) {
+    // The HTTP upload callback is synchronous, so actively drain UART here.
+    esp3d_serial_service.handle();
+    if (_uploadStatus == SUCCESS_STATE) return true;
+    if (_uploadStatus == ERROR_STATE) {
+      esp3d_log_e("Marlin rejected MKS upload frame");
+      return false;
     }
     ESP3DHal::wait(0);
   }
-  esp3d_log("Time out no board answer");
+  esp3d_log_e("MKS upload acknowledgement timeout");
   return false;
-}
-
-void MKSService::sendFrameDone() {
-  digitalWrite(ESP_FLAG_PIN, !BOARD_READY_FLAG_VALUE);
 }
 
 bool MKSService::sendGcodeFrame(const char *cmd) {

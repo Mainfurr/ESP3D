@@ -53,6 +53,8 @@ class ESP3DSerialService final {
   #endif // ARDUINO_ARCH_ESP8266
   size_t writeBytes(const uint8_t *buffer, size_t size);
   size_t readBytes(uint8_t *sbuf, size_t len);
+  int available();
+  int read();
   inline bool started() { return _started; }
   bool dispatch(ESP3DMessage *message);
   void initAuthentication();
@@ -64,6 +66,14 @@ class ESP3DSerialService final {
   static void receiveBridgeSerialCb();
 #endif  // ARDUINO_ARCH_ESP32
  private:
+  friend class BinaryFileTransferService;
+  bool claimExclusive();
+  void releaseExclusive();
+  size_t writeExclusive(const uint8_t* buffer, size_t size);
+  size_t writeGuarded(const uint8_t* buffer, size_t size, bool exclusive);
+  size_t writeRaw(const uint8_t* buffer, size_t size);
+  bool _exclusive = false;
+  bool _writing = false;
   uint32_t _baudRate;
   ESP3DAuthenticationLevel _auth;
   uint8_t _serialIndex;
