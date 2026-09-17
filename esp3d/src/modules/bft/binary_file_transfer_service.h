@@ -1,4 +1,4 @@
-/* Marlin Binary File Transfer 0.1.0 client (uncompressed files). */
+/* Marlin Binary File Transfer 0.1.0 client with static heatshrink compression. */
 #ifndef _BINARY_FILE_TRANSFER_SERVICE_H
 #define _BINARY_FILE_TRANSFER_SERVICE_H
 #include "../../include/esp3d_config.h"
@@ -43,6 +43,8 @@ class BinaryFileTransferService {
   static bool ascii(const char* command, AsciiReply expected);
   static bool synchronize();
   static bool query();
+  static bool writePayload(const uint8_t* data, size_t size);
+  static bool drainEncoder();
   static bool sendPacket(uint8_t protocol, uint8_t type,
                          const uint8_t* payload = nullptr, size_t size = 0,
                          Reply expected = Reply::None);
@@ -58,6 +60,7 @@ class BinaryFileTransferService {
   static Mode _mode;
   static File _file;
   static bool _failed, _cleanup, _transportReady;
+  static bool _compression;
   static char _error[128], _line[kLineCapacity];
   static size_t _lineSize;
   static bool _discardLine;

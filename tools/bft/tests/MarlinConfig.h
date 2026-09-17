@@ -7,8 +7,8 @@
 #include <vector>
 using millis_t = uint32_t;
 using serial_index_t = int;
-#define ENABLED(x) 0  // compression is deliberately outside these tests
-#define TERN_(x, y)
+#define ENABLED(x) 1
+#define TERN_(x, y) y
 #define HAS_MEDIA 0
 #define NUM_SERIAL 1
 #define F(x) x
@@ -68,6 +68,9 @@ struct Card {
     if (writeError) return -1;
     contents.insert(contents.end(), data, data + size);
     return size;
+  }
+  int write(const uint8_t* data, size_t size) {
+    return write(reinterpret_cast<const char*>(data), size);
   }
   void closefile() {
     opened = false;

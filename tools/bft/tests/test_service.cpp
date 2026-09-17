@@ -27,6 +27,7 @@ namespace {
 uint32_t now = 0;
 std::deque<uint8_t> rx;
 std::string response, asciiInput;
+std::string compressionCapability = "none";
 std::vector<std::vector<uint8_t>> packets;
 std::vector<std::string> commands;
 std::function<bool(const std::string&)> drop;
@@ -76,6 +77,7 @@ void reset() {
   now = 0;
   rx.clear();
   response.clear();
+  compressionCapability = "none";
   asciiInput.clear();
   packets.clear();
   commands.clear();
@@ -127,7 +129,8 @@ void emit(const std::string& s) {
       response += c;
       continue;
     }
-    const std::string line = response;
+    const std::string line = response.rfind("PFT:version:", 0) == 0
+        ? "PFT:version:0.1.0:compression:" + compressionCapability : response;
     response.clear();
     if (beforeResponse) beforeResponse(line);
     if (!drop || !drop(line)) enqueue(line + "\n");
@@ -181,6 +184,95 @@ size_t ESP3DSerialService::writeExclusive(const uint8_t* data, size_t size) {
   return size;
 }
 int main() {
+  test("compressed stream: fragmented input, wraparound and final flush", [] {
+    compressionCapability = "heatshrink,8,4";
+    binaryStream[0].sync = 254;
+    writeLimit = 3;
+    std::vector<uint8_t> input;
+    const std::string line = "G1 X123.45 Y67.89 E0.1234\n";
+    for (unsigned i = 0; i < 200; ++i)
+      input.insert(input.end(), line.begin(), line.end());
+    assert(B::begin("C.GCO"));
+    assert(packets[2][8] == 0 && packets[2][9] == 1);
+    for (size_t i = 0; i < input.size();) {
+      const size_t chunk = std::min(input.size() - i, i % 71 + 1);
+      assert(B::write(input.data() + i, chunk));
+      i += chunk;
+    }
+    assert(B::finish());
+    assert(card.contents == input);
+    size_t wireBytes = 0;
+    for (const auto& p : packets)
+      if (p[3] == 0x13) wireBytes += p[4] | (p[5] << 8);
+    assert(wireBytes < input.size() / 2);
+    std::cout << "Compression: " << input.size() << " -> " << wireBytes << '\n';
+  });
+  test("compressed empty, short and incompressible files; encoder resets", [] {
+    compressionCapability = "heatshrink,8,4";
+    for (size_t size : {0, 1, 15, 16, 255, 256, 257, 4096}) {
+      std::vector<uint8_t> input(size);
+      uint32_t random = 123456;
+      for (auto& byte : input) {
+        random ^= random << 13;
+        random ^= random >> 17;
+        random ^= random << 5;
+        byte = random & 255;
+      }
+      assert(B::begin("C.GCO"));
+      assert(B::write(input.data(), input.size()));
+      assert(B::finish());
+      assert(card.contents == input);
+    }
+  });
+  test("compression capabilities fall back to raw", [] {
+    for (const char* capability : {"none", "heatshrink,11,4", "heatshrink,8,3",
+                                   "heatshrink,8,4junk", "unknown", ""}) {
+      compressionCapability = capability;
+      assert(B::begin("R.GCO"));
+      assert(!SDFileTransferProtocol::compression);
+      const uint8_t input[] = {0, 0xff, 3, 7};
+      assert(B::write(input, sizeof(input)));
+      assert(B::finish());
+      assert(card.contents == std::vector<uint8_t>(input, input + sizeof(input)));
+    }
+  });
+  test("compressed keepalive cannot change encoding midstream", [] {
+    compressionCapability = "heatshrink,8,4";
+    assert(B::begin("C.GCO"));
+    compressionCapability = "none";
+    const uint8_t input[] = {'A', 'B', 'C'};
+    assert(B::write(input, sizeof(input)));
+    now += 3100;
+    assert(B::idle());
+    assert(B::finish());
+    assert(card.contents == std::vector<uint8_t>(input, input + sizeof(input)));
+  });
+  test("compressed packet retry preserves stream and abort resets encoder", [] {
+    compressionCapability = "heatshrink,8,4";
+    assert(B::begin("C.GCO"));
+    std::vector<uint8_t> input(1024, 'A');
+    corruptNext = true;
+    assert(B::write(input.data(), input.size()));
+    assert(B::finish());
+    assert(card.contents == input);
+    assert(packets[3] == packets[4]);
+    assert(B::begin("D.GCO"));
+    assert(B::write(input.data(), 17));
+    assert(B::abort());
+    assert(B::begin("E.GCO"));
+    assert(B::write(input.data(), 3));
+    assert(B::finish());
+    assert(card.contents == std::vector<uint8_t>(3, 'A'));
+  });
+  test("compressed SD failure during final flush is reported", [] {
+    compressionCapability = "heatshrink,8,4";
+    assert(B::begin("C.GCO"));
+    const uint8_t byte = 'A';
+    assert(B::write(&byte, 1));
+    card.writeError = true;
+    assert(!B::finish());
+    assert(B::abort());
+  });
   test(
       "actual Marlin receiver: arbitrary bytes, wraparound, partial UART "
       "writes",

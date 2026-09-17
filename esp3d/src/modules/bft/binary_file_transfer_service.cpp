@@ -1,4 +1,4 @@
-/* Marlin Binary File Transfer 0.1.0 client (uncompressed files). */
+/* Marlin Binary File Transfer 0.1.0 client with static heatshrink compression. */
 #include "../../include/esp3d_config.h"
 #if COMMUNICATION_PROTOCOL == RAW_SERIAL
 #include <stdlib.h>
@@ -6,8 +6,16 @@
 
 #include "../serial/serial_service.h"
 #include "binary_file_transfer_service.h"
+extern "C" {
+#include "heatshrink/heatshrink_encoder.h"
+}
 
 namespace {
+static_assert(!HEATSHRINK_DYNAMIC_ALLOC, "BFT encoder must use static memory");
+static_assert(HEATSHRINK_STATIC_WINDOW_BITS == 8 &&
+                  HEATSHRINK_STATIC_LOOKAHEAD_BITS == 4,
+              "Update BFT capability matching when changing compression");
+heatshrink_encoder encoder;
 constexpr uint32_t kResponseTimeout = 5000;
 constexpr uint32_t kAckTimeout = 1000;
 constexpr uint32_t kKeepaliveInterval = 3000;
@@ -53,6 +61,7 @@ BinaryFileTransferService::File BinaryFileTransferService::_file = File::None;
 bool BinaryFileTransferService::_failed = false;
 bool BinaryFileTransferService::_cleanup = false;
 bool BinaryFileTransferService::_transportReady = false;
+bool BinaryFileTransferService::_compression = false;
 char BinaryFileTransferService::_error[128] = {};
 char BinaryFileTransferService::_line[kLineCapacity] = {};
 size_t BinaryFileTransferService::_lineSize = 0;
@@ -233,7 +242,11 @@ void BinaryFileTransferService::lineReceived() {
       _transportReady = false;
       return;
     }
-    // No compression negotiation is needed: OPEN always requests raw data.
+    // Negotiate only before OPEN. Keepalive QUERY must not change an active
+    // stream's encoding, even if the peer advertises different capabilities.
+    if (_waiting && _expected == Reply::Version && _file == File::None)
+      _compression =
+          strcmp(_line, "PFT:version:0.1.0:compression:heatshrink,8,4") == 0;
     result = Reply::Version;
   } else if (strcmp(_line, "PFT:fail") == 0)
     result = Reply::Fail;
@@ -412,6 +425,8 @@ bool BinaryFileTransferService::begin(const char* filename) {
   // A second caller must never abort or reset another caller's transfer.
   if (active()) return false;
   _failed = _cleanup = false;
+  _compression = false;
+  heatshrink_encoder_reset(&encoder);
   _error[0] = '\0';
   if (!filename || !*filename || strlen(filename) > kFilenameCapacity ||
       strcmp(filename, ".") == 0 || strcmp(filename, "..") == 0) {
@@ -461,7 +476,8 @@ bool BinaryFileTransferService::begin(const char* filename) {
     fail("Filename exceeds Marlin BFT buffer");
     return false;
   }
-  uint8_t payload[kFilenameCapacity + 3] = {};  // dummy=0, compression=0
+  uint8_t payload[kFilenameCapacity + 3] = {};  // dummy=0
+  payload[1] = _compression ? 1 : 0;
   memcpy(payload + 2, filename, length + 1);
   _file = File::Opening;
   const bool opened = sendPacket(1, 1, payload, length + 3, Reply::Success);
@@ -491,6 +507,36 @@ bool BinaryFileTransferService::write(const uint8_t* data, size_t size) {
     fail("No writable BFT file");
     return false;
   }
+  if (!_compression) return writePayload(data, size);
+  while (size) {
+    size_t consumed = 0;
+    // heatshrink's sink API is non-const, but only copies the input bytes.
+    if (heatshrink_encoder_sink(&encoder, const_cast<uint8_t*>(data), size,
+                               &consumed) != HSER_SINK_OK) {
+      fail("BFT compression input failed");
+      return false;
+    }
+    data += consumed;
+    size -= consumed;
+    if (!drainEncoder()) return false;
+  }
+  return true;
+}
+bool BinaryFileTransferService::drainEncoder() {
+  uint8_t output[kPacketPayloadCapacity];
+  HSE_poll_res result;
+  do {
+    size_t produced = 0;
+    result = heatshrink_encoder_poll(&encoder, output, _payloadSize, &produced);
+    if (result < 0) {
+      fail("BFT compression output failed");
+      return false;
+    }
+    if (produced && !writePayload(output, produced)) return false;
+  } while (result == HSER_POLL_MORE);
+  return true;
+}
+bool BinaryFileTransferService::writePayload(const uint8_t* data, size_t size) {
   while (size) {
     const size_t chunk = size > _payloadSize ? _payloadSize : size;
     if (!sendPacket(1, 3, data, chunk)) return false;
@@ -520,7 +566,19 @@ bool BinaryFileTransferService::leave() {
   return true;
 }
 bool BinaryFileTransferService::finish() {
-  if (!idle() || !query()) return false;
+  if (!idle()) return false;
+  if (_compression) {
+    HSE_finish_res result;
+    do {
+      result = heatshrink_encoder_finish(&encoder);
+      if (result < 0) {
+        fail("BFT compression finish failed");
+        return false;
+      }
+      if (result == HSER_FINISH_MORE && !drainEncoder()) return false;
+    } while (result != HSER_FINISH_DONE);
+  }
+  if (!query()) return false;
   _file = File::Closing;
   const bool closed = sendPacket(1, 2, nullptr, 0, Reply::Success);
   if (_reply == Reply::Success || _reply == Reply::Invalid)
