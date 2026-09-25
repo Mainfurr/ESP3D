@@ -18,33 +18,39 @@ constexpr uint32_t kHttpBodyTimeout = 5000;
 constexpr uint32_t kHttpUploadTimeout = 30UL * 60 * 1000;
 
 void sendJson(WiFiClient* client, uint16_t status, uint8_t error,
-              const char* bftError = nullptr) {
+              const char* errorDetail = nullptr,
+              const char* errorHeader = "X-ESP3D-BFT-Error",
+              bool started = false) {
+  const char* body = error ? "{\"err\":1}"
+                           : started ? "{\"err\":0,\"started\":true}"
+                                     : "{\"err\":0}";
   const char* reason = status == 200   ? "OK"
                        : status == 401 ? "Unauthorized"
                                        : "Bad Request";
   client->printf(
       "HTTP/1.1 %u %s\r\n"
       "Content-Type: application/json\r\n"
-      "Content-Length: 9\r\n"
+      "Content-Length: %u\r\n"
       "Connection: close\r\n"
       "Cache-Control: no-cache\r\n",
-      status, reason);
-  if (bftError && *bftError) {
+      status, reason, static_cast<unsigned>(strlen(body)));
+  if (errorDetail && *errorDetail) {
     // Error text may include a response received from the printer. Do not let
     // it inject arbitrary HTTP headers.
-    client->print("X-ESP3D-BFT-Error: ");
+    client->print(errorHeader);
+    client->print(": ");
     for (const unsigned char* p =
-             reinterpret_cast<const unsigned char*>(bftError);
+             reinterpret_cast<const unsigned char*>(errorDetail);
          *p; ++p)
       client->write(*p >= 0x20 && *p <= 0x7e ? *p : '?');
     client->print("\r\n");
   }
-  client->printf("\r\n{\"err\":%u}", error);
+  client->printf("\r\n%s", body);
 }
 
-bool parseFilename(const String& url, String* filename) {
+bool parseFilename(const String& url, const char* path, String* filename) {
   const int queryStart = url.indexOf('?');
-  if (queryStart < 0 || url.substring(0, queryStart) != "/upload") return false;
+  if (queryStart < 0 || url.substring(0, queryStart) != path) return false;
   const String query = url.substring(queryStart + 1);
   int offset = 0;
   while (offset <= static_cast<int>(query.length())) {
@@ -66,6 +72,26 @@ bool parseFilename(const String& url, String* filename) {
       return false;
   }
   return true;
+}
+
+bool queryFlag(const String& url, const char* name) {
+  const int queryStart = url.indexOf('?');
+  if (queryStart < 0) return false;
+  const String query = url.substring(queryStart + 1);
+  int offset = 0;
+  while (offset <= static_cast<int>(query.length())) {
+    const int separator = query.indexOf('&', offset);
+    const String item =
+        query.substring(offset, separator < 0 ? query.length() : separator);
+    const int equal = item.indexOf('=');
+    if (equal > 0 && item.substring(0, equal) == name) {
+      const String value = ESP8266WebServer::urlDecode(item.substring(equal + 1));
+      return value == "1" || value.equalsIgnoreCase("true");
+    }
+    if (separator < 0) break;
+    offset = separator + 1;
+  }
+  return false;
 }
 
 bool parseContentLength(const String& value, uint32_t* length) {
@@ -127,12 +153,14 @@ void BinaryFileTransferHttp::begin(ESP8266WebServer* server) {
 
 ESP8266WebServer::ClientFuture BinaryFileTransferHttp::handleRequest(
     const String& method, const String& url, WiFiClient* client) {
-  if (method != "POST" || !(url == "/upload" || url.startsWith("/upload?"))) {
+  const bool isUpload = url == "/upload" || url.startsWith("/upload?");
+  const bool isPrint = url == "/print" || url.startsWith("/print?");
+  if (method != "POST" || (!isUpload && !isPrint)) {
     return ESP8266WebServer::CLIENT_REQUEST_CAN_CONTINUE;
   }
 
   String filename;
-  if (!parseFilename(url, &filename)) {
+  if (!parseFilename(url, isUpload ? "/upload" : "/print", &filename)) {
     sendJson(client, 400, 1);
     return ESP8266WebServer::CLIENT_IS_GIVEN;
   }
@@ -165,17 +193,28 @@ ESP8266WebServer::ClientFuture BinaryFileTransferHttp::handleRequest(
     }
   }
 
-  uint32_t contentLength = 0;
-  if (chunked || !parseContentLength(contentLengthHeader, &contentLength)) {
-    sendJson(client, 400, 1);
-    return ESP8266WebServer::CLIENT_IS_GIVEN;
-  }
 #ifdef AUTHENTICATION_FEATURE
   if (!isAuthenticated(authorization, cookie, client->remoteIP())) {
     sendJson(client, 401, 1);
     return ESP8266WebServer::CLIENT_IS_GIVEN;
   }
 #endif  // AUTHENTICATION_FEATURE
+
+  if (isPrint) {
+    if (!BinaryFileTransferService::startPrint(filename.c_str())) {
+      sendJson(client, BinaryFileTransferService::active() ? 409 : 400, 1,
+               BinaryFileTransferService::error(), "X-ESP3D-Print-Error");
+    } else {
+      sendJson(client, 200, 0, nullptr, "X-ESP3D-Print-Error", true);
+    }
+    return ESP8266WebServer::CLIENT_IS_GIVEN;
+  }
+
+  uint32_t contentLength = 0;
+  if (chunked || !parseContentLength(contentLengthHeader, &contentLength)) {
+    sendJson(client, 400, 1);
+    return ESP8266WebServer::CLIENT_IS_GIVEN;
+  }
 
   // Do not let a second request abort an existing or unresolved session.
   if (BinaryFileTransferService::active()) {
@@ -221,6 +260,8 @@ ESP8266WebServer::ClientFuture BinaryFileTransferHttp::handleRequest(
     ESP3DHal::wait(1);
   }
   if (successful) successful = BinaryFileTransferService::finish();
+  if (successful && queryFlag(url, "print"))
+    successful = BinaryFileTransferService::startPrint(filename.c_str());
   if (!successful) BinaryFileTransferService::abort();
   sendJson(client, successful ? 200 : 400, successful ? 0 : 1,
            successful ? nullptr : BinaryFileTransferService::error());
@@ -289,6 +330,15 @@ class RawBftRequestHandler final : public RequestHandler {
 void BinaryFileTransferHttp::begin(WebServer* server) {
   webServer = server;
   server->addHandler(new RawBftRequestHandler());
+  server->on("/print", HTTP_POST, handlePrintRequest);
+}
+
+bool BinaryFileTransferHttp::queuePrint(const String& filename) {
+  if (!parseFilename(filename))
+    return false;
+  // Match the MKS uploader's Marlin sequence but wait for the selection and
+  // start acknowledgements instead of reporting a merely queued command.
+  return BinaryFileTransferService::startPrint(filename.c_str());
 }
 
 void BinaryFileTransferHttp::handleRawBody() {
@@ -341,6 +391,14 @@ void BinaryFileTransferHttp::handleRawBody() {
 }
 
 void BinaryFileTransferHttp::handleRequest() {
+  if (requestSuccessful && webServer->hasArg("print") &&
+      (webServer->arg("print") == "1" ||
+       webServer->arg("print").equalsIgnoreCase("true"))) {
+    if (!queuePrint(webServer->arg("X-Filename"))) {
+      requestSuccessful = false;
+      requestStatus = 503;
+    }
+  }
   if (!requestSuccessful) {
     const String error = safeError();
     if (error.length()) webServer->sendHeader("X-ESP3D-BFT-Error", error);
@@ -349,6 +407,25 @@ void BinaryFileTransferHttp::handleRequest() {
                   "application/json",
                   requestSuccessful ? "{\"err\":0}" : "{\"err\":1}");
   requestSuccessful = false;
+}
+
+void BinaryFileTransferHttp::handlePrintRequest() {
+#ifdef AUTHENTICATION_FEATURE
+  if (AuthenticationService::getAuthenticatedLevel() ==
+      ESP3DAuthenticationLevel::guest) {
+    webServer->send(401, "application/json", "{\"err\":1}");
+    return;
+  }
+#endif  // AUTHENTICATION_FEATURE
+  const String filename = webServer->arg("X-Filename");
+  if (!queuePrint(filename)) {
+    const uint16_t status = BinaryFileTransferService::active() ? 409 : 400;
+    const String error = safeError();
+    if (error.length()) webServer->sendHeader("X-ESP3D-Print-Error", error);
+    webServer->send(status, "application/json", "{\"err\":1}");
+    return;
+  }
+  webServer->send(200, "application/json", "{\"err\":0,\"started\":true}");
 }
 
 #endif  // RAW_SERIAL && supported HTTP server

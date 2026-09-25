@@ -2,6 +2,7 @@
 #include "../../include/esp3d_config.h"
 #if COMMUNICATION_PROTOCOL == RAW_SERIAL
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "../serial/serial_service.h"
@@ -170,11 +171,17 @@ void BinaryFileTransferService::lineReceived() {
     if (_asciiExpected == AsciiReply::Switch &&
         strcmp(_line, "echo:Switching to Binary Protocol") == 0)
       _asciiMarker = true;
+    if (_asciiExpected == AsciiReply::FileSelected &&
+        startsWith(_line, "File selected"))
+      _asciiMarker = true;
     if (strcmp(_line, "Cap:BINARY_FILE_TRANSFER:0") == 0 ||
         strcmp(_line, "Cap:SD_WRITE:0") == 0)
       _unsupported = true;
     // Ignore leftover ACKs until the distinctive response to our command.
-    if (_asciiMarker && (strcmp(_line, "ok") == 0 || startsWith(_line, "ok ")))
+    if ((_asciiExpected == AsciiReply::Ok &&
+         (strcmp(_line, "ok") == 0 || startsWith(_line, "ok "))) ||
+        (_asciiMarker &&
+         (strcmp(_line, "ok") == 0 || startsWith(_line, "ok "))))
       _asciiOk = true;
     return;
   }
@@ -590,6 +597,42 @@ bool BinaryFileTransferService::finish() {
   else
     _file = File::Unknown;
   return closed && leave();
+}
+bool BinaryFileTransferService::startPrint(const char* filename) {
+  if (active() || !filename || !*filename) return false;
+  char select[128];
+  const int selectLength =
+      snprintf(select, sizeof(select), "M23 %s\n", filename);
+  if (selectLength < 0 || selectLength >= static_cast<int>(sizeof(select)))
+    return false;
+  if (!esp3d_serial_service.claimExclusive()) {
+    fail("Printer UART is busy");
+    return false;
+  }
+  _failed = false;
+  _error[0] = '\0';
+  _mode = Mode::Ascii;
+  _file = File::None;
+  _transportReady = _waiting = _waitingSync = false;
+  _asciiExpected = AsciiReply::None;
+  _lineSize = 0;
+  _discardLine = false;
+  lockRx();
+  _head = _tail = 0;
+  _overflow = false;
+  _active = true;
+  unlockRx();
+  esp3d_serial_service.flush();
+  // Keep the commands in separate request/response rounds. Otherwise the
+  // `ok` for M21 can be mistaken for the M23 acknowledgement and M24 starts
+  // the previously selected file (or no file at all).
+  const bool mounted = ascii("M21\n", AsciiReply::Ok);
+  // Marlin variants have different informational M23 messages, but all
+  // terminate the command with `ok`.
+  const bool selected = mounted && ascii(select, AsciiReply::Ok);
+  const bool started = selected && ascii("M24\n", AsciiReply::Ok);
+  release();
+  return started;
 }
 bool BinaryFileTransferService::abort() {
   if (!active()) return true;

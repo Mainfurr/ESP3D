@@ -9,7 +9,8 @@
 
 class BinaryFileTransferHttp {
  public:
-  // Installs POST /upload?X-Filename=<filename> with a streamed raw body.
+  // Installs POST /upload?X-Filename=<filename> with a streamed raw body and
+  // POST /print?X-Filename=<filename> to start a completed root-SD file.
   static void begin(ESP8266WebServer* server);
 
  private:
@@ -30,6 +31,8 @@ class BinaryFileTransferHttp {
   friend class RawBftRequestHandler;
   static void handleRequest();
   static void handleRawBody();
+  static void handlePrintRequest();
+  static bool queuePrint(const String& filename);
 };
 #endif  // RAW_SERIAL && supported HTTP server
 #endif  // _BINARY_FILE_TRANSFER_HTTP_H

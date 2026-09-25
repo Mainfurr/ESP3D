@@ -11,6 +11,9 @@ class BinaryFileTransferService {
   // Call while waiting for the next input chunk. Services UART and keepalive.
   static bool idle();
   static bool finish();
+  // Select a completed root-SD file and start it, waiting for Marlin's ASCII
+  // confirmations. This is kept here so replies cannot race normal routing.
+  static bool startPrint(const char* filename);
   // False means recovery is unconfirmed: the UART remains reserved.
   static bool abort();
   static void receiveByte(uint8_t value);
@@ -29,7 +32,7 @@ class BinaryFileTransferService {
     Invalid,
     IoError
   };
-  enum class AsciiReply : uint8_t { None, Firmware, Switch };
+  enum class AsciiReply : uint8_t { None, Firmware, Switch, FileSelected, Ok };
   // Upper bound for the peer-advertised payload size. Keep this modest on
   // ESP8266: it determines permanent BSS use for packet and encoder buffers.
   static constexpr size_t kPacketPayloadCapacity = 1024;
