@@ -70,6 +70,7 @@ uint8_t BinaryFileTransferService::_sync = 0,
         BinaryFileTransferService::_pendingSync = 0;
 uint16_t BinaryFileTransferService::_payloadSize = 0;
 uint8_t BinaryFileTransferService::_packet[kPacketPayloadCapacity + 10] = {};
+uint8_t BinaryFileTransferService::_encoderOutput[kPacketPayloadCapacity] = {};
 bool BinaryFileTransferService::_waiting = false,
      BinaryFileTransferService::_acked = false;
 bool BinaryFileTransferService::_resend = false,
@@ -265,9 +266,10 @@ void BinaryFileTransferService::lineReceived() {
   if (result == Reply::None) return;  // SD diagnostics / auto reports
   const bool error = result != Reply::Success && result != Reply::Version;
   if (error) fail(_line);
-  if (_waiting &&
-      (result == _expected || (error && _expected == Reply::Success)))
-    _reply = result;
+  // A PFT failure can follow any file command, including QUERY used as the
+  // write barrier. Keep that response: otherwise a late SD error is reported
+  // misleadingly as a missing result after its ACK was already received.
+  if (_waiting && (result == _expected || error)) _reply = result;
   if (result == Reply::Invalid && _file == File::Open) _file = File::None;
 }
 uint16_t BinaryFileTransferService::fletcher(const uint8_t* data, size_t size) {
@@ -523,16 +525,16 @@ bool BinaryFileTransferService::write(const uint8_t* data, size_t size) {
   return true;
 }
 bool BinaryFileTransferService::drainEncoder() {
-  uint8_t output[kPacketPayloadCapacity];
   HSE_poll_res result;
   do {
     size_t produced = 0;
-    result = heatshrink_encoder_poll(&encoder, output, _payloadSize, &produced);
+    result = heatshrink_encoder_poll(&encoder, _encoderOutput, _payloadSize,
+                                    &produced);
     if (result < 0) {
       fail("BFT compression output failed");
       return false;
     }
-    if (produced && !writePayload(output, produced)) return false;
+    if (produced && !writePayload(_encoderOutput, produced)) return false;
   } while (result == HSER_POLL_MORE);
   return true;
 }

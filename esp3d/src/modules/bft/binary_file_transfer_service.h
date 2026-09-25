@@ -30,7 +30,9 @@ class BinaryFileTransferService {
     IoError
   };
   enum class AsciiReply : uint8_t { None, Firmware, Switch };
-  static constexpr size_t kPacketPayloadCapacity = 128;
+  // Upper bound for the peer-advertised payload size. Keep this modest on
+  // ESP8266: it determines permanent BSS use for packet and encoder buffers.
+  static constexpr size_t kPacketPayloadCapacity = 1024;
   static constexpr size_t kFilenameCapacity = 120;
   static constexpr size_t kLineCapacity = 384;
   static constexpr size_t kRxCapacity = 1024;
@@ -67,6 +69,8 @@ class BinaryFileTransferService {
   static uint8_t _sync, _pendingSync;
   static uint16_t _payloadSize;
   static uint8_t _packet[kPacketPayloadCapacity + 10];
+  // Encoder output must not live on the ESP8266 HTTP handler's stack.
+  static uint8_t _encoderOutput[kPacketPayloadCapacity];
   static bool _waiting, _acked, _resend, _waitingSync, _gotSync;
   static Reply _expected, _reply;
   static AsciiReply _asciiExpected;

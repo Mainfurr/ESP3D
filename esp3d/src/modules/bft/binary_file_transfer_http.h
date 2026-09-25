@@ -16,5 +16,20 @@ class BinaryFileTransferHttp {
   static ESP8266WebServer::ClientFuture handleRequest(
       const String& method, const String& url, WiFiClient* client);
 };
-#endif  // RAW_SERIAL && ARDUINO_ARCH_ESP8266
+#elif COMMUNICATION_PROTOCOL == RAW_SERIAL && defined(ARDUINO_ARCH_ESP32)
+#include <WebServer.h>
+
+class RawBftRequestHandler;
+
+class BinaryFileTransferHttp {
+ public:
+  // Installs POST /upload?X-Filename=<filename> with a streamed raw body.
+  static void begin(WebServer* server);
+
+ private:
+  friend class RawBftRequestHandler;
+  static void handleRequest();
+  static void handleRawBody();
+};
+#endif  // RAW_SERIAL && supported HTTP server
 #endif  // _BINARY_FILE_TRANSFER_HTTP_H

@@ -17,7 +17,8 @@ constexpr size_t kHttpReadBufferSize = 512;
 constexpr uint32_t kHttpBodyTimeout = 5000;
 constexpr uint32_t kHttpUploadTimeout = 30UL * 60 * 1000;
 
-void sendJson(WiFiClient* client, uint16_t status, uint8_t error) {
+void sendJson(WiFiClient* client, uint16_t status, uint8_t error,
+              const char* bftError = nullptr) {
   const char* reason = status == 200   ? "OK"
                        : status == 401 ? "Unauthorized"
                                        : "Bad Request";
@@ -26,9 +27,19 @@ void sendJson(WiFiClient* client, uint16_t status, uint8_t error) {
       "Content-Type: application/json\r\n"
       "Content-Length: 9\r\n"
       "Connection: close\r\n"
-      "Cache-Control: no-cache\r\n\r\n"
-      "{\"err\":%u}",
-      status, reason, error);
+      "Cache-Control: no-cache\r\n",
+      status, reason);
+  if (bftError && *bftError) {
+    // Error text may include a response received from the printer. Do not let
+    // it inject arbitrary HTTP headers.
+    client->print("X-ESP3D-BFT-Error: ");
+    for (const unsigned char* p =
+             reinterpret_cast<const unsigned char*>(bftError);
+         *p; ++p)
+      client->write(*p >= 0x20 && *p <= 0x7e ? *p : '?');
+    client->print("\r\n");
+  }
+  client->printf("\r\n{\"err\":%u}", error);
 }
 
 bool parseFilename(const String& url, String* filename) {
@@ -211,8 +222,133 @@ ESP8266WebServer::ClientFuture BinaryFileTransferHttp::handleRequest(
   }
   if (successful) successful = BinaryFileTransferService::finish();
   if (!successful) BinaryFileTransferService::abort();
-  sendJson(client, successful ? 200 : 400, successful ? 0 : 1);
+  sendJson(client, successful ? 200 : 400, successful ? 0 : 1,
+           successful ? nullptr : BinaryFileTransferService::error());
   return ESP8266WebServer::CLIENT_IS_GIVEN;
 }
 
-#endif  // RAW_SERIAL && ARDUINO_ARCH_ESP8266
+#elif COMMUNICATION_PROTOCOL == RAW_SERIAL && defined(ARDUINO_ARCH_ESP32)
+
+#include <WebServer.h>
+
+#include "../authentication/authentication_service.h"
+#include "binary_file_transfer_http.h"
+#include "binary_file_transfer_service.h"
+
+namespace {
+constexpr uint32_t kHttpUploadTimeout = 30UL * 60 * 1000;
+WebServer* webServer = nullptr;
+bool requestActive = false;
+bool requestSuccessful = false;
+uint16_t requestStatus = 400;
+uint32_t requestStarted = 0;
+
+bool parseFilename(const String& filename) {
+  if (filename.length() == 0 || filename.length() > 120) return false;
+  for (size_t i = 0; i < filename.length(); ++i) {
+    const uint8_t value = filename.charAt(i);
+    if (value < 0x20 || value == 0x7f || strchr("/\\\\:*?\"<>|", value))
+      return false;
+  }
+  return true;
+}
+
+String safeError() {
+  String result;
+  const char* error = BinaryFileTransferService::error();
+  if (!error) return result;
+  while (*error) {
+    const uint8_t value = static_cast<uint8_t>(*error++);
+    result += value >= 0x20 && value <= 0x7e ? static_cast<char>(value) : '?';
+  }
+  return result;
+}
+}  // namespace
+
+// A normal FunctionRequestHandler calls its upload callback for both raw and
+// multipart bodies. BFT intentionally supports only raw bodies, so use a
+// dedicated handler and never dereference WebServer::raw() for multipart.
+class RawBftRequestHandler final : public RequestHandler {
+ public:
+  bool canHandle(WebServer&, HTTPMethod method, String uri) override {
+    return method == HTTP_POST && uri == "/upload";
+  }
+  bool canRaw(WebServer& server, String uri) override {
+    return canHandle(server, HTTP_POST, uri);
+  }
+  bool handle(WebServer& server, HTTPMethod method, String uri) override {
+    if (!canHandle(server, method, uri)) return false;
+    BinaryFileTransferHttp::handleRequest();
+    return true;
+  }
+  void raw(WebServer& server, String uri, HTTPRaw&) override {
+    if (canRaw(server, uri)) BinaryFileTransferHttp::handleRawBody();
+  }
+};
+
+void BinaryFileTransferHttp::begin(WebServer* server) {
+  webServer = server;
+  server->addHandler(new RawBftRequestHandler());
+}
+
+void BinaryFileTransferHttp::handleRawBody() {
+  HTTPRaw& raw = webServer->raw();
+  if (raw.status == RAW_START) {
+    requestActive = requestSuccessful = false;
+    requestStatus = 400;
+    requestStarted = millis();
+#ifdef AUTHENTICATION_FEATURE
+    if (AuthenticationService::getAuthenticatedLevel() ==
+        ESP3DAuthenticationLevel::guest) {
+      requestStatus = 401;
+      return;
+    }
+#endif  // AUTHENTICATION_FEATURE
+    // extra_script.py retains the query arguments for WebServer raw requests.
+    const String filename = webServer->arg("X-Filename");
+    if (!webServer->hasHeader("Content-Length") || !parseFilename(filename) ||
+        BinaryFileTransferService::active())
+      return;
+    requestActive = BinaryFileTransferService::begin(filename.c_str());
+    if (!requestActive) BinaryFileTransferService::abort();
+    return;
+  }
+  if (raw.status == RAW_WRITE) {
+    if (requestActive &&
+        (millis() - requestStarted >= kHttpUploadTimeout ||
+         !BinaryFileTransferService::write(raw.buf, raw.currentSize))) {
+      requestActive = false;
+      BinaryFileTransferService::abort();
+    }
+    return;
+  }
+  if (raw.status == RAW_END) {
+    if (requestActive && millis() - requestStarted < kHttpUploadTimeout) {
+      requestSuccessful = BinaryFileTransferService::finish();
+      requestActive = false;
+      if (!requestSuccessful) BinaryFileTransferService::abort();
+    } else if (requestActive) {
+      requestActive = false;
+      BinaryFileTransferService::abort();
+    }
+    requestStatus = requestSuccessful ? 200 : 400;
+    return;
+  }
+  if (raw.status == RAW_ABORTED && requestActive) {
+    requestActive = false;
+    BinaryFileTransferService::abort();
+  }
+}
+
+void BinaryFileTransferHttp::handleRequest() {
+  if (!requestSuccessful) {
+    const String error = safeError();
+    if (error.length()) webServer->sendHeader("X-ESP3D-BFT-Error", error);
+  }
+  webServer->send(requestSuccessful ? 200 : requestStatus,
+                  "application/json",
+                  requestSuccessful ? "{\"err\":0}" : "{\"err\":1}");
+  requestSuccessful = false;
+}
+
+#endif  // RAW_SERIAL && supported HTTP server
