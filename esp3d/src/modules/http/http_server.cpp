@@ -33,7 +33,7 @@
 #include "../authentication/authentication_service.h"
 #if COMMUNICATION_PROTOCOL == RAW_SERIAL && \
     (defined(ARDUINO_ARCH_ESP8266) || defined(ARDUINO_ARCH_ESP32))
-#include "../bft/binary_file_transfer_http.h"
+#include "handlers/octoprint-upload.h"
 #endif  // RAW_SERIAL && supported HTTP server
 #include "../filesystem/esp_filesystem.h"
 #include "../network/netconfig.h"
@@ -75,16 +75,11 @@ void HTTP_Server::init_handlers() {
   // MKS_SERIAL
   _webserver->on("/upload", HTTP_ANY, handleMKSUpload, MKSFileupload);
 #endif  // COMMUNICATION_PROTOCOL == MKS_SERIAL
-#if COMMUNICATION_PROTOCOL == RAW_SERIAL && defined(ARDUINO_ARCH_ESP8266)
-  // MKS-compatible raw POST endpoint. It streams into Marlin BFT without
-  // letting ESP8266WebServer buffer the entire G-code file in RAM.
-  BinaryFileTransferHttp::begin(_webserver);
-#endif  // RAW_SERIAL && ARDUINO_ARCH_ESP8266
-#if COMMUNICATION_PROTOCOL == RAW_SERIAL && defined(ARDUINO_ARCH_ESP32)
-  // Stream the raw POST body through Marlin BFT; WebServer keeps only one
-  // HTTP_RAW_BUFLEN-sized block in RAM.
-  BinaryFileTransferHttp::begin(_webserver);
-#endif  // RAW_SERIAL && ARDUINO_ARCH_ESP32
+#if COMMUNICATION_PROTOCOL == RAW_SERIAL && \
+    (defined(ARDUINO_ARCH_ESP8266) || defined(ARDUINO_ARCH_ESP32))
+  // OctoPrint-compatible multipart upload streamed directly into Marlin BFT.
+  installOctoPrintUpload(_webserver);
+#endif  // RAW_SERIAL && supported HTTP server
 #ifdef SD_DEVICE
   // SD
   _webserver->on("/sdfiles", HTTP_ANY, handleSDFileList, SDFileupload);
