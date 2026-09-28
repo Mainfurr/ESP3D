@@ -50,6 +50,7 @@ void HTTP_Server::MKSFileupload() {
       size_t fileSize = 0;
       String filename = upload.filename;
       String sfilename = "s" + filename;
+      filename.replace(",", "_");
       esp3d_log("Filename: %s", filename.c_str());
       // No / in filename
       if (filename[0] == '/') {

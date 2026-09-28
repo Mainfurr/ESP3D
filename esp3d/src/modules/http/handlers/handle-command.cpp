@@ -31,6 +31,9 @@
 #include "../../../core/esp3d_settings.h"
 #include "../../../core/esp3d_string.h"
 #include "../../authentication/authentication_service.h"
+#if COMMUNICATION_PROTOCOL == RAW_SERIAL
+#include "../../bft/binary_file_transfer_service.h"
+#endif  // COMMUNICATION_PROTOCOL == RAW_SERIAL
 
 
 // Handle web command query and send answer//////////////////////////////
@@ -86,6 +89,17 @@ void HTTP_Server::handle_web_command() {
         esp3d_log_e("Cannot create message");
       }
     } else {
+#if COMMUNICATION_PROTOCOL == RAW_SERIAL
+      // Marlin treats every byte received after M28 B1 as binary stream data.
+      // Reject polling G-code here instead of acknowledging an HTTP request
+      // whose command would be discarded (or, on another transport, corrupt
+      // the active BFT frame).
+      if (BinaryFileTransferService::active()) {
+        _webserver->send(409, "text/plain",
+                         "Printer UART is reserved for BFT upload");
+        return;
+      }
+#endif  // COMMUNICATION_PROTOCOL == RAW_SERIAL
       HTTP_Server::set_http_headers();
       // the command is not ESP3D so it will be forwarded to the output client
       // no need to wait to answer then

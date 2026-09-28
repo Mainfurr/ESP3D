@@ -56,6 +56,7 @@ void HTTP_Server::FSFileupload() {
   } else {
     HTTPUpload& upload = _webserver->upload();
     String upload_filename = upload.filename;
+    upload_filename.replace(",", "_");
     if ((_upload_status != UPLOAD_STATUS_FAILED) ||
         (upload.status == UPLOAD_FILE_START)) {
 #if defined(ESP3DLIB_ENV) && COMMUNICATION_PROTOCOL == SOCKET_SERIAL
@@ -71,7 +72,7 @@ void HTTP_Server::FSFileupload() {
         if (upload_filename[0] != '/') {
           filename = "/" + upload_filename;
         } else {
-          filename = upload.filename;
+          filename = upload_filename;
         }
         if (_webserver->hasArg("rpath")) {
           upload_filename = _webserver->arg("rpath") + filename;

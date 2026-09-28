@@ -341,6 +341,9 @@ class MultipartUpload {
         return;
       }
       _fileSeen = true;
+      for (char* c = filename; *c; ++c) {
+        if (*c == ',') *c = '_';
+      }
       strcpy(_filename, filename);
       esp3d_log("[OCTO] filename=%s", _filename);
       if (!_sink.start(_filename)) {
@@ -503,6 +506,13 @@ String jsonError(const char* error) {
 #include <ESP8266WebServer.h>
 
 ESP8266WebServer* octoServer = nullptr;
+// ESP8266 has a 4 KiB continuation stack. MultipartUpload plus the two input
+// buffers needs about 2.7 KiB, leaving too little stack for synchronous BFT
+// calls and their UART/Wi-Fi internals. The web server processes one request
+// at a time, so persistent storage is safe here; begin() resets it per request.
+MultipartUpload esp8266Upload;
+uint8_t esp8266UploadBuffer[kReadBufferSize] = {};
+char esp8266UploadBoundary[kBoundaryCapacity] = {};
 
 void sendJson(WiFiClient* client, uint16_t status, const String& body) {
   const char* reason = status == 200   ? "OK"
@@ -554,7 +564,7 @@ ESP8266WebServer::ClientFuture handleUpload(const String& method,
   }
 
   uint32_t remaining = 0;
-  char boundary[kBoundaryCapacity] = {};
+  char* const boundary = esp8266UploadBoundary;
   if (chunked || !parseContentLength(contentLength, &remaining) ||
       !parseBoundary(contentType, boundary)) {
     sendJson(client, 400, jsonError("Expected multipart/form-data request"));
@@ -566,9 +576,9 @@ ESP8266WebServer::ClientFuture handleUpload(const String& method,
   }
 
   esp3d_log("[OCTO] POST /api/files/local");
-  MultipartUpload upload;
+  MultipartUpload& upload = esp8266Upload;
   upload.begin(boundary);
-  uint8_t buffer[kReadBufferSize];
+  uint8_t* const buffer = esp8266UploadBuffer;
   uint32_t lastData = millis();
   const uint32_t started = lastData;
   bool timeout = false;
@@ -579,7 +589,8 @@ ESP8266WebServer::ClientFuture handleUpload(const String& method,
     }
     const int available = client->available();
     if (available > 0) {
-      size_t wanted = remaining > sizeof(buffer) ? sizeof(buffer) : remaining;
+      size_t wanted =
+          remaining > kReadBufferSize ? kReadBufferSize : remaining;
       if (wanted > static_cast<size_t>(available)) wanted = available;
       const int received = client->read(buffer, wanted);
       if (received <= 0 || !upload.feed(buffer, static_cast<size_t>(received)))
@@ -659,6 +670,7 @@ void handleUploadBody() {
     requestActive = requestSuccessful = requestFailed = false;
     requestBusy = false;
     requestFilename = upload.filename;
+    requestFilename.replace(",", "_");
     requestStartTime = millis();
     esp3d_log("[OCTO] POST /api/files/local filename=%s",
               requestFilename.c_str());

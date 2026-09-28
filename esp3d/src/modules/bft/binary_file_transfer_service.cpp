@@ -87,6 +87,7 @@ bool BinaryFileTransferService::_asciiMarker = false,
      BinaryFileTransferService::_asciiOk = false;
 bool BinaryFileTransferService::_unsupported = false;
 uint32_t BinaryFileTransferService::_lastFileActivity = 0;
+size_t BinaryFileTransferService::_writeBytesSinceBarrier = 0;
 
 bool BinaryFileTransferService::active() {
   lockRx();
@@ -319,7 +320,16 @@ bool BinaryFileTransferService::ascii(const char* command,
   }
   _asciiExpected = AsciiReply::None;
   if (!_asciiOk || _mode == Mode::Unknown) {
-    fail("Marlin ASCII handshake timed out");
+    const char* step = "command";
+    if (expected == AsciiReply::Firmware)
+      step = "M115";
+    else if (expected == AsciiReply::Switch)
+      step = "M28 B1";
+    else if (expected == AsciiReply::FileSelected)
+      step = "M23";
+    char error[64];
+    snprintf(error, sizeof(error), "Marlin %s handshake timed out", step);
+    fail(error);
     return false;
   }
   return true;
@@ -384,34 +394,63 @@ bool BinaryFileTransferService::sendPacket(uint8_t protocol, uint8_t type,
     if (_packet[i] == 0xad && _packet[i + 1] == 0xb5) retrySafe = false;
   _pendingSync = _sync;
   _expected = expected;
-  _reply = Reply::None;
-  _acked = _resend = false;
-  _waiting = true;
-  uint8_t retries = 0;
-  uint32_t sentAt = millis();
-  bool sent = writeAll(_packet, packetSize);
-  while (sent && _transportReady) {
-    poll();
-    if (!_transportReady) break;
-    if (_acked && (expected == Reply::None || _reply != Reply::None)) break;
-    const uint32_t elapsed = millis() - sentAt;
-    if (_acked) {
-      // Duplicate packets cannot recover a lost PFT result.
-      if (elapsed >= kResponseTimeout) break;
-    } else if (_resend || elapsed >= kAckTimeout) {
-      // rs of the current sequence explicitly says the packet was not accepted.
-      if (retries == kMaxRetries || (!_resend && !retrySafe)) break;
-      ++retries;
-      _resend = false;
-      sentAt = millis();
-      sent = writeAll(_packet, packetSize);
+  auto sendAndWait = [&]() {
+    _reply = Reply::None;
+    _acked = _resend = false;
+    _waiting = true;
+    uint8_t retries = 0;
+    uint32_t sentAt = millis();
+    bool sent = writeAll(_packet, packetSize);
+    while (sent && _transportReady) {
+      poll();
+      if (!_transportReady) break;
+      if (_acked && (expected == Reply::None || _reply != Reply::None)) break;
+      const uint32_t elapsed = millis() - sentAt;
+      if (_acked) {
+        // Duplicate packets cannot recover a lost PFT result.
+        if (elapsed >= kResponseTimeout) break;
+      } else if (_resend || elapsed >= kAckTimeout) {
+        // rs of the current sequence explicitly says the packet was not
+        // accepted.
+        if (retries == kMaxRetries || (!_resend && !retrySafe)) break;
+        ++retries;
+        _resend = false;
+        sentAt = millis();
+        sent = writeAll(_packet, packetSize);
+      }
+      ESP3DHal::wait(1);
     }
-    ESP3DHal::wait(1);
+    _waiting = false;
+    return sent;
+  };
+  bool sent = sendAndWait();
+  if (!_acked) {
+    // A SYNC response contains Marlin's current sequence number. It is a
+    // safe recovery point after an ACK loss: nextSync proves the packet was
+    // accepted, while pendingSync proves it was not and can be sent again.
+    const uint8_t nextSync = static_cast<uint8_t>(_pendingSync + 1);
+    if (expected != Reply::None && _reply == expected && synchronize() &&
+        _sync == nextSync)
+      return true;
+    if (protocol == 1 && type == 3) {
+      for (uint8_t recovery = 0;
+           !_acked && recovery < kMaxRetries && !_failed; ++recovery) {
+        if (!synchronize()) break;
+        if (_sync == nextSync) return true;
+        if (_sync != _pendingSync) break;
+        sent = sendAndWait();
+      }
+    }
   }
-  _waiting = false;
   if (!_acked) {
     _transportReady = false;
-    fail("BFT acknowledgement missing; result unknown");
+    char error[96];
+    snprintf(error, sizeof(error),
+             "BFT acknowledgement missing for packet %u, sync %u; result "
+             "unknown",
+             static_cast<unsigned>((protocol << 4) | type),
+             static_cast<unsigned>(_pendingSync));
+    fail(error);
     return false;
   }
   if (expected != Reply::None && _reply == Reply::None) {
@@ -435,6 +474,7 @@ bool BinaryFileTransferService::begin(const char* filename) {
   if (active()) return false;
   _failed = _cleanup = false;
   _compression = false;
+  _writeBytesSinceBarrier = 0;
   heatshrink_encoder_reset(&encoder);
   _error[0] = '\0';
   if (!filename || !*filename || strlen(filename) > kFilenameCapacity ||
@@ -549,9 +589,15 @@ bool BinaryFileTransferService::writePayload(const uint8_t* data, size_t size) {
   while (size) {
     const size_t chunk = size > _payloadSize ? _payloadSize : size;
     if (!sendPacket(1, 3, data, chunk)) return false;
-    // ACK precedes SD write. A QUERY result is the dispatch barrier that
-    // surfaces late WRITE errors before another WRITE or FILE/CLOSE is sent.
-    if (!query()) return false;
+    _writeBytesSinceBarrier += chunk;
+    // ACK precedes the SD write, but poll() runs before and while waiting for
+    // every following packet ACK, so asynchronous PFT errors still stop the
+    // transfer immediately. QUERY is retained as a periodic strict dispatch
+    // barrier and again in finish(), without paying its round trip per packet.
+    if (_writeBytesSinceBarrier >= kWriteBarrierPayloadBytes) {
+      if (!query()) return false;
+      _writeBytesSinceBarrier = 0;
+    }
     data += chunk;
     size -= chunk;
   }

@@ -36,6 +36,11 @@ class BinaryFileTransferService {
   // Upper bound for the peer-advertised payload size. Keep this modest on
   // ESP8266: it determines permanent BSS use for packet and encoder buffers.
   static constexpr size_t kPacketPayloadCapacity = 1024;
+  // A QUERY establishes that Marlin has dispatched all preceding WRITEs, but
+  // doing it after every (typically 96-byte) packet nearly halves throughput.
+  // Incoming errors are still parsed before every packet; this only bounds the
+  // interval between strict write barriers.
+  static constexpr size_t kWriteBarrierPayloadBytes = 4 * 1024;
   static constexpr size_t kFilenameCapacity = 120;
   static constexpr size_t kLineCapacity = 384;
   static constexpr size_t kRxCapacity = 1024;
@@ -79,6 +84,7 @@ class BinaryFileTransferService {
   static AsciiReply _asciiExpected;
   static bool _asciiMarker, _asciiOk, _unsupported;
   static uint32_t _lastFileActivity;
+  static size_t _writeBytesSinceBarrier;
 };
 #endif
 #endif

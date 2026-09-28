@@ -30,6 +30,9 @@
 #include "../../core/esp3d_settings.h"
 #include "../../core/esp3d_string.h"
 #include "../authentication/authentication_service.h"
+#if COMMUNICATION_PROTOCOL == RAW_SERIAL
+#include "../bft/binary_file_transfer_service.h"
+#endif  // COMMUNICATION_PROTOCOL == RAW_SERIAL
 #include "websocket_server.h"
 
 WebSocket_Server websocket_terminal_server("webui-v3",
@@ -349,6 +352,15 @@ void WebSocket_Server::flushRXData(const uint8_t *data, size_t size,
   if (!data || !_started) {
     return;
   }
+#if COMMUNICATION_PROTOCOL == RAW_SERIAL
+  // Terminal / WebUI polling uses this path too. In BFT mode the printer
+  // accepts bytes as binary frames, so no ordinary G-code may reach UART.
+  if (BinaryFileTransferService::active() &&
+      !esp3d_commands.is_esp_command(const_cast<uint8_t *>(data), size)) {
+    pushMSG("error: Printer UART is reserved for BFT upload\n");
+    return;
+  }
+#endif  // COMMUNICATION_PROTOCOL == RAW_SERIAL
   ESP3DMessage *message = esp3d_message_manager.newMsg(
       _type, esp3d_commands.getOutputClient(), 
       data, size, _auth);
