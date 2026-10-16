@@ -596,7 +596,9 @@ app.all("/sdfiles", function (req, res) {
     }
     let myFile = req.files.myfiles;
     if (typeof myFile.length == "undefined") {
-        let fullpath = path.normalize(sdpath + mypath + myFile.name);
+        let fullpath = path.normalize(
+            sdpath + mypath + myFile.name.replace(/,/g, "_")
+        );
         console.log("[server]one file:" + fullpath);
         myFile.mv(fullpath, function (err) {
             if (err) return res.status(500).send(err);
@@ -606,7 +608,9 @@ app.all("/sdfiles", function (req, res) {
     } else {
         console.log(myFile.length + " files");
         for (let i = 0; i < myFile.length; i++) {
-            let fullpath = path.normalize(sdpath + mypath + myFile[i].name);
+            let fullpath = path.normalize(
+                sdpath + mypath + myFile[i].name.replace(/,/g, "_")
+            );
             console.log(fullpath);
             myFile[i].mv(fullpath).then(() => {
                 if (i == myFile.length - 1) res.send(filesList(mypath, sdpath));
@@ -647,7 +651,9 @@ app.all("/files", function (req, res) {
     }
     let myFile = req.files.myfiles;
     if (typeof myFile.length == "undefined") {
-        let fullpath = path.normalize(serverpath + mypath + myFile.name);
+        let fullpath = path.normalize(
+            serverpath + mypath + myFile.name.replace(/,/g, "_")
+        );
         console.log("[server]one file:" + fullpath);
         myFile.mv(fullpath, function (err) {
             if (err) return res.status(500).send(err);
@@ -657,7 +663,9 @@ app.all("/files", function (req, res) {
     } else {
         console.log(myFile.length + " files");
         for (let i = 0; i < myFile.length; i++) {
-            let fullpath = path.normalize(serverpath + mypath + myFile[i].name);
+            let fullpath = path.normalize(
+                serverpath + mypath + myFile[i].name.replace(/,/g, "_")
+            );
             console.log(fullpath);
             myFile[i].mv(fullpath).then(() => {
                 if (i == myFile.length - 1)

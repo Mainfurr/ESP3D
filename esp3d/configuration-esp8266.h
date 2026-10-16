@@ -46,7 +46,7 @@
 
 // Serial Communication protocol
 // Basic serial protocol, without data change
-#define COMMUNICATION_PROTOCOL MKS_SERIAL
+#define COMMUNICATION_PROTOCOL RAW_SERIAL
 
 // Main serial port
 #define ESP_SERIAL_OUTPUT USE_SERIAL_0
@@ -54,7 +54,7 @@
 // TX=null
 
 // Serial buffer size
-// 512 Bytes
+// 1024 Bytes
 // Maximum size of the serial buffer
 #define SERIAL_RX_BUFFER_SIZE 1024
 #define WEB_UPDATE_FEATURE
@@ -204,7 +204,7 @@
 
 // Printer screen
 // Your printer has a display
-//#define PRINTER_HAS_DISPLAY 
+#define PRINTER_HAS_DISPLAY 
 
 /************************************
 *

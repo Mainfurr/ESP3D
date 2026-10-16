@@ -51,13 +51,16 @@ class BinaryFileTransferService {
   static void release();
   static bool writeAll(const uint8_t* data, size_t size);
   static bool ascii(const char* command, AsciiReply expected);
-  static bool synchronize();
+  static bool asciiAttempt(const char* command, AsciiReply expected,
+                           uint32_t timeout);
+  static bool synchronize(const char* phase);
   static bool query();
   static bool writePayload(const uint8_t* data, size_t size);
   static bool drainEncoder();
   static bool sendPacket(uint8_t protocol, uint8_t type,
                          const uint8_t* payload = nullptr, size_t size = 0,
-                         Reply expected = Reply::None);
+                         Reply expected = Reply::None,
+                         bool retryMissingQueryResult = true);
   static bool leave();
   static uint16_t fletcher(const uint8_t* data, size_t size);
 
@@ -70,6 +73,7 @@ class BinaryFileTransferService {
   static Mode _mode;
   static File _file;
   static bool _failed, _cleanup, _transportReady;
+  static bool _fileResultMissing;
   static bool _compression;
   static char _error[128], _line[kLineCapacity];
   static size_t _lineSize;

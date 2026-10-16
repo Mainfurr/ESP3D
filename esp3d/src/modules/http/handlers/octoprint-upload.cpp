@@ -72,12 +72,49 @@ bool validFilename(const char* filename) {
   return true;
 }
 
+// Many Marlin builds can read long FAT names but cannot create them: writing
+// long names requires LONG_FILENAME_WRITE_SUPPORT. Retry a rejected G-code
+// OPEN with a stable DOS 8.3 name so slicers may still use .gcode filenames.
+bool shortGcodeAlias(const char* filename, char* alias) {
+  const char* dot = strrchr(filename, '.');
+  if (!dot || (strcasecmp(dot, ".gcode") != 0 &&
+               strcasecmp(dot, ".gco") != 0 &&
+               strcasecmp(dot, ".gc") != 0))
+    return false;
+  const size_t baseLength = dot - filename;
+  bool shortName = baseLength > 0 && baseLength <= 8 &&
+                   strlen(dot + 1) <= 3;
+  for (const unsigned char* p =
+           reinterpret_cast<const unsigned char*>(filename);
+       p < reinterpret_cast<const unsigned char*>(dot); ++p) {
+    if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+          (*p >= '0' && *p <= '9') || *p == '_' || *p == '-'))
+      shortName = false;
+  }
+  if (shortName) return false;
+
+  uint64_t hash = UINT64_C(14695981039346656037);
+  for (const unsigned char* p =
+           reinterpret_cast<const unsigned char*>(filename);
+       *p; ++p) {
+    hash ^= *p;
+    hash *= UINT64_C(1099511628211);
+  }
+  static constexpr char digits[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  for (int i = 7; i >= 0; --i) {
+    alias[i] = digits[hash % 36];
+    hash /= 36;
+  }
+  memcpy(alias + 8, ".GCO", 5);
+  return true;
+}
+
 // This is the former BinaryFileTransferHttp upload loop, kept independent of
 // HTTP framing. Multipart parsing may decide which bytes are file data, but it
 // must not change BFT ownership, keepalive, write, close, or recovery rules.
 class BftUploadSink {
  public:
-  bool start(const char* filename) {
+  bool start(char* filename) {
     _busy = _failed = false;
     if (BinaryFileTransferService::active()) {
       _busy = true;
@@ -85,8 +122,24 @@ class BftUploadSink {
     }
     _ownsTransfer = true;
     if (!BinaryFileTransferService::begin(filename)) {
+      const char* error = BinaryFileTransferService::error();
+      const bool openRejected = strcmp(error, "PFT:fail") == 0 ||
+                                strcmp(error, "PTF:fail") == 0;
+      char alias[13];
+      const bool canRetry = openRejected && shortGcodeAlias(filename, alias);
+      if (canRetry) {
+        if (BinaryFileTransferService::abort()) {
+          if (BinaryFileTransferService::begin(alias)) {
+            strcpy(filename, alias);
+            esp3d_log("[OCTO] Marlin accepted short filename=%s", filename);
+            return true;
+          }
+          BinaryFileTransferService::abort();
+        }
+      } else {
+        BinaryFileTransferService::abort();
+      }
       _failed = true;
-      BinaryFileTransferService::abort();
       return false;
     }
     return true;
@@ -678,11 +731,15 @@ void handleUploadBody() {
       requestFailed = true;
       return;
     }
-    if (!octoUpload.start(requestFilename.c_str())) {
+    char filename[kFilenameCapacity + 1];
+    requestFilename.toCharArray(filename, sizeof(filename));
+    if (!octoUpload.start(filename)) {
       requestBusy = octoUpload.busy();
       failUpload();
       return;
     }
+    // start() may replace a rejected long name with the accepted 8.3 alias.
+    requestFilename = filename;
     requestActive = true;
     esp3d_log("[OCTO] upload started");
     return;
@@ -726,6 +783,11 @@ void sendUploadResult() {
     octoServer->send(201, "application/json", body);
   } else {
     const char* error = octoUpload.error();
+    // startPrint() is intentionally outside BftUploadSink because the BFT
+    // session has already ended. Surface its error instead of reporting the
+    // misleading generic multipart failure.
+    if ((!error || !*error) && BinaryFileTransferService::error()[0])
+      error = BinaryFileTransferService::error();
     if (!error || !*error)
       error = requestActive ? "Upload timed out" : "Multipart upload failed";
     const uint16_t status = requestBusy ? 409 : 400;

@@ -38,6 +38,9 @@ bool fragment = false, pumping = false;
 unsigned readGate = 0;
 size_t writeLimit = 10000, writeBudget = 10000000;
 uint32_t closeAt = 0, asciiAfterClose = 0;
+unsigned skipPostCloseM115 = 0;
+uint32_t delayCloseResultMs = 0, delayedAt = 0;
+std::string delayedLine;
 std::vector<uint8_t> written;
 uint8_t commandMeta = 0;
 char receiveBuffer[96] = {};
@@ -47,6 +50,10 @@ void enqueue(const std::string& s) {
 void pump() {
   if (pumping) return;
   pumping = true;
+  if (!delayedLine.empty() && now >= delayedAt) {
+    enqueue(delayedLine);
+    delayedLine.clear();
+  }
   if (card.flag.binary_mode)
     binaryStream[0].receive(receiveBuffer);
   else {
@@ -56,14 +63,24 @@ void pump() {
         commands.push_back(asciiInput);
         if (asciiInput == "M115") {
           if (closeAt) asciiAfterClose = now;
-          enqueue("FIRMWARE_NAME:Marlin test\n");
-          if (!noCapability)
-            enqueue(capability ? "Cap:BINARY_FILE_TRANSFER:1\n"
-                               : "Cap:BINARY_FILE_TRANSFER:0\n");
-          enqueue("ok N0 P16 B3\n");
+          if (closeAt && skipPostCloseM115)
+            --skipPostCloseM115;
+          else {
+            enqueue("FIRMWARE_NAME:Marlin test\n");
+            if (!noCapability)
+              enqueue(capability ? "Cap:BINARY_FILE_TRANSFER:1\n"
+                                 : "Cap:BINARY_FILE_TRANSFER:0\n");
+            enqueue("ok N0 P16 B3\n");
+          }
         } else if (asciiInput == "M28 B1" && !noSwitch) {
           card.flag.binary_mode = true;
           enqueue("echo:Switching to Binary Protocol\nok\n");
+        } else if (asciiInput == "M21") {
+          enqueue("ok\n");
+        } else if (asciiInput.rfind("M23 ", 0) == 0) {
+          enqueue("File selected\nok\n");
+        } else if (asciiInput == "M24") {
+          enqueue("ok\n");
         }
         asciiInput.clear();
         if (card.flag.binary_mode) break;
@@ -88,6 +105,9 @@ void reset() {
   capability = true;
   noCapability = noSwitch = corruptNext = fragment = pumping = false;
   closeAt = asciiAfterClose = 0;
+  skipPostCloseM115 = 0;
+  delayCloseResultMs = delayedAt = 0;
+  delayedLine.clear();
   written.clear();
   commandMeta = 0;
   readGate = 0;
@@ -133,7 +153,12 @@ void emit(const std::string& s) {
         ? "PFT:version:0.1.0:compression:" + compressionCapability : response;
     response.clear();
     if (beforeResponse) beforeResponse(line);
-    if (!drop || !drop(line)) enqueue(line + "\n");
+    if (commandMeta == 0x12 && line == "PFT:success" &&
+        delayCloseResultMs) {
+      delayedLine = line + "\n";
+      delayedAt = now + delayCloseResultMs;
+    } else if (!drop || !drop(line))
+      enqueue(line + "\n");
     if (commandMeta == 2 && line.rfind("ok", 0) == 0) closeAt = now;
   }
 }
@@ -309,6 +334,48 @@ int main() {
     assert(B::finish());
     assert(card.opens == 2);
   });
+  test("lost entry SYNC reply is retried without opening twice", [] {
+    unsigned lost = 0;
+    drop = [&](const std::string& s) {
+      return s.rfind("ss", 0) == 0 && lost++ == 0;
+    };
+    assert(B::begin("A.GCO"));
+    assert(count(1) == 2);
+    assert(card.opens == 1);
+    assert(B::finish());
+  });
+  test("missing entry SYNC identifies the failed phase", [] {
+    drop = [](const std::string& s) { return s.rfind("ss", 0) == 0; };
+    assert(!B::begin("A.GCO"));
+    assert(count(1) == 3);
+    assert(std::string(B::error()).find("during entry") != std::string::npos);
+    assert(card.opens == 0);
+  });
+  test("M115 lost during mode switch is retried", [] {
+    assert(B::begin("A.GCO"));
+    skipPostCloseM115 = 1;
+    assert(B::finish());
+    assert(!B::active());
+    assert(commands.back() == "M115");
+    assert(std::count(commands.begin(), commands.end(), "M115") == 3);
+  });
+  test("confirmed binary close releases UART even if M115 is lost", [] {
+    assert(B::begin("A.GCO"));
+    skipPostCloseM115 = 2;
+    assert(!B::finish());
+    assert(!B::active());
+    assert(!esp3d_serial_service.exclusive);
+    assert(std::string(B::error()).find("M115") != std::string::npos);
+  });
+  test("print waits for separate mount, select, and start confirmations", [] {
+    assert(B::startPrint("A.GCO"));
+    assert(commands.size() == 3);
+    assert(commands[0] == "M21");
+    assert(commands[1] == "M23 A.GCO");
+    assert(commands[2] == "M24");
+    assert(!B::active());
+    assert(!esp3d_serial_service.exclusive);
+  });
   test("explicit missing capability and absent capability", [] {
     capability = false;
     assert(!B::begin("A.GCO"));
@@ -361,26 +428,74 @@ int main() {
     assert(count(0x13) == 2);
     assert(B::finish());
   });
-  test("lost ok255 fails conservatively and resynchronizes cleanup", [] {
+  test("repeated lost WRITE ACKs recover with SYNC", [] {
+    assert(B::begin("A.GCO"));
+    drop = [](const std::string& s) {
+      return commandMeta == 0x13 && s.rfind("ok", 0) == 0;
+    };
+    const uint8_t byte = 'A';
+    assert(B::write(&byte, 1));
+    assert(card.writes == 1);
+    assert(count(0x13) == 3);
+    assert(B::finish());
+  });
+  test("lost recovery SYNC reply is retried without repeating WRITE", [] {
+    assert(B::begin("A.GCO"));
+    unsigned syncReplies = 0;
+    drop = [&](const std::string& s) {
+      if (commandMeta == 0x13 && s.rfind("ok", 0) == 0) return true;
+      return s.rfind("ss", 0) == 0 && syncReplies++ == 0;
+    };
+    const uint8_t byte = 'A';
+    assert(B::write(&byte, 1));
+    assert(card.writes == 1);
+    assert(count(1) == 3);  // entry plus two recovery attempts
+    assert(B::finish());
+  });
+  test("missing recovery SYNC identifies the failed phase", [] {
+    assert(B::begin("A.GCO"));
+    drop = [](const std::string& s) {
+      return (commandMeta == 0x13 && s.rfind("ok", 0) == 0) ||
+             s.rfind("ss", 0) == 0;
+    };
+    const uint8_t byte = 'A';
+    assert(!B::write(&byte, 1));
+    assert(std::string(B::error()).find("during packet recovery") !=
+           std::string::npos);
+  });
+  test("late resend request does not abort SYNC recovery", [] {
+    assert(B::begin("A.GCO"));
+    drop = [](const std::string& s) {
+      return commandMeta == 0x13 && s.rfind("ok", 0) == 0;
+    };
+    beforeResponse = [](const std::string& s) {
+      if (s.rfind("ss", 0) == 0) enqueue("rs3\n");
+    };
+    const uint8_t byte = 'A';
+    assert(B::write(&byte, 1));
+    assert(card.writes == 1);
+    assert(B::finish());
+  });
+  test("lost ok255 recovers with SYNC without replaying data", [] {
     binaryStream[0].sync = 253;
     assert(B::begin("A.GCO"));
     drop = [](const std::string& s) { return s == "ok255"; };
     const uint8_t byte = 'A';
-    assert(!B::write(&byte, 1));
+    assert(B::write(&byte, 1));
     assert(count(0x13) == 1);
-    assert(B::abort());
-    assert(card.removes == 1);
-    assert(!B::active());
+    assert(card.writes == 1);
+    assert(B::finish());
   });
-  test("lost ACK with embedded token never replays unsafe duplicate body", [] {
+  test("lost ACK with embedded token recovers with SYNC without replay", [] {
     assert(B::begin("A.GCO"));
     drop = [](const std::string& s) {
       return commandMeta == 0x13 && s.rfind("ok", 0) == 0;
     };
     const uint8_t bytes[] = {0xad, 0xb5, 0, 1, 0, 0, 1, 3};
-    assert(!B::write(bytes, sizeof(bytes)));
+    assert(B::write(bytes, sizeof(bytes)));
     assert(count(0x13) == 1);
-    assert(B::abort());
+    assert(card.writes == 1);
+    assert(B::finish());
   });
   test("SD ioerror is sticky and stops new writes", [] {
     assert(B::begin("A.GCO"));
@@ -407,26 +522,65 @@ int main() {
     assert(!B::finish());
     assert(B::abort());
   });
-  test("QUERY barrier catches error arriving only after WRITE ACK", [] {
+  test("finish QUERY barrier catches error arriving after WRITE ACK", [] {
     assert(B::begin("A.GCO"));
     beforeResponse = [](const std::string& s) {
       if (commandMeta == 0x10 && s.rfind("ok", 0) == 0)
         enqueue("PFT:ioerror\n");
     };
     const uint8_t byte = 'A';
-    assert(!B::write(&byte, 1));
+    assert(B::write(&byte, 1));
     assert(count(0x13) == 1);
+    assert(!B::finish());
     beforeResponse = nullptr;
     assert(B::abort());
+  });
+  test("WRITE barriers are periodic rather than per packet", [] {
+    assert(B::begin("A.GCO"));
+    std::vector<uint8_t> data(4096, 'A');
+    assert(B::write(data.data(), data.size()));
+    // At 96-byte Marlin payloads this is 43 WRITEs, but only one periodic
+    // barrier in addition to the QUERY which opened the session.
+    assert(count(0x10) == 2);
+    assert(B::finish());
+    assert(count(0x10) == 3);
+  });
+  test("lost QUERY result retries a new QUERY without repeating WRITE", [] {
+    assert(B::begin("A.GCO"));
+    unsigned lost = 0;
+    drop = [&](const std::string& s) {
+      return commandMeta == 0x10 &&
+             s.rfind("PFT:version:", 0) == 0 && lost++ == 0;
+    };
+    std::vector<uint8_t> data(4096, 'A');
+    assert(B::write(data.data(), data.size()));
+    assert(count(0x10) == 3);  // entry, missing result, fresh QUERY
+    assert(count(0x13) == 43);
+    assert(card.contents == data);
+    assert(B::finish());
+  });
+  test("two missing QUERY results still fail without replaying WRITE", [] {
+    assert(B::begin("A.GCO"));
+    drop = [](const std::string& s) {
+      return commandMeta == 0x10 && s.rfind("PFT:version:", 0) == 0;
+    };
+    std::vector<uint8_t> data(4096, 'A');
+    assert(!B::write(data.data(), data.size()));
+    assert(count(0x10) == 3);
+    assert(count(0x13) == 43);
+    assert(card.contents == data);
+    assert(std::string(B::error()).find("packet 16") !=
+           std::string::npos);
   });
   test("lost OPEN result keeps uncertainty and never ABORTs", [] {
     drop = [](const std::string& s) {
       return commandMeta == 0x11 && s == "PFT:success";
     };
     assert(!B::begin("A.GCO"));
-    assert(!B::abort());
+    assert(B::abort());
     assert(count(0x14) == 0);
-    assert(card.opened && B::active());
+    assert(!card.opened && !B::active());
+    assert(card.removes == 1);
   });
   test("lost CLOSE result never ABORTs potentially closed file", [] {
     assert(B::begin("A.GCO"));
@@ -434,18 +588,27 @@ int main() {
       return commandMeta == 0x12 && s == "PFT:success";
     };
     assert(!B::finish());
-    assert(!B::abort());
+    assert(B::abort());
     assert(count(0x14) == 0);
-    assert(B::active());
+    assert(!B::active());
+    assert(card.removes == 0);
   });
-  test("failed ABORT cannot send CONTROL/CLOSE or release UART", [] {
+  test("slow SD close result is accepted after five seconds", [] {
+    assert(B::begin("A.GCO"));
+    delayCloseResultMs = 6000;
+    assert(B::finish());
+    assert(!B::active());
+    assert(card.closes == 1);
+  });
+  test("lost ABORT result waits for safe idle cleanup", [] {
     assert(B::begin("A.GCO"));
     drop = [](const std::string& s) {
       return commandMeta == 0x14 && s == "PFT:success";
     };
-    assert(!B::abort());
-    assert(count(2) == 0);
-    assert(B::active());
+    assert(B::abort());
+    assert(count(0x14) == 1);
+    assert(count(2) == 1);
+    assert(!B::active());
   });
   test("busy never closes/deletes foreign transfer", [] {
     SDFileTransferProtocol::transfer_active = true;
@@ -479,7 +642,7 @@ int main() {
     assert(!B::abort());
     assert(B::active());
   });
-  test("overlong diagnostic suffix cannot acknowledge a packet", [] {
+  test("overlong diagnostic suffix is ignored before SYNC recovery", [] {
     assert(B::begin("A.GCO"));
     drop = [](const std::string& s) {
       return commandMeta == 0x13 && s.rfind("ok", 0) == 0;
@@ -489,7 +652,8 @@ int main() {
         enqueue(std::string(384, 'x') + s + "\n");
     };
     const uint8_t byte = 'A';
-    assert(!B::write(&byte, 1));
+    assert(B::write(&byte, 1));
+    assert(B::finish());
   });
   test("second begin preserves current transfer", [] {
     assert(B::begin("A.GCO"));
@@ -550,16 +714,16 @@ int main() {
     assert(B::finish());
     assert(card.writes == 1);
   });
-  test("ACK retries have a bound", [] {
+  test("ACK retries fall back to SYNC after their bound", [] {
     assert(B::begin("A.GCO"));
     drop = [](const std::string& s) {
       return commandMeta == 0x13 && s.rfind("ok", 0) == 0;
     };
     const uint8_t byte = 'A';
-    assert(!B::write(&byte, 1));
+    assert(B::write(&byte, 1));
     assert(count(0x13) == 3);
     assert(card.writes == 1);
-    assert(B::abort());
+    assert(B::finish());
   });
   test("mismatched rs never renumbers data", [] {
     assert(B::begin("A.GCO"));
@@ -622,6 +786,15 @@ int main() {
     assert(!B::idle());
     assert(!B::abort());
     assert(count(2) == 0 && count(0x14) == 0);
+  });
+  test("PTF fail is recognized as an OPEN rejection", [] {
+    B::_mode = B::Mode::Binary;
+    B::_waiting = true;
+    B::_expected = B::Reply::Success;
+    std::strcpy(B::_line, "PTF:fail");
+    B::lineReceived();
+    assert(B::_reply == B::Reply::Fail);
+    assert(std::strcmp(B::error(), "PTF:fail") == 0);
   });
   test("printer restart invalidates file ownership", [] {
     assert(B::begin("A.GCO"));

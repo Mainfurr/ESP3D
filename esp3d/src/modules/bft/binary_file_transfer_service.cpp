@@ -18,6 +18,8 @@ static_assert(HEATSHRINK_STATIC_WINDOW_BITS == 8 &&
               "Update BFT capability matching when changing compression");
 heatshrink_encoder encoder;
 constexpr uint32_t kResponseTimeout = 5000;
+// SD mount/flush can take longer than a transport response on slow cards.
+constexpr uint32_t kFileResultTimeout = 30000;
 constexpr uint32_t kAckTimeout = 1000;
 constexpr uint32_t kKeepaliveInterval = 3000;
 // Below Marlin's 10-second idle timeout. Never delete after ownership expires.
@@ -62,6 +64,7 @@ BinaryFileTransferService::File BinaryFileTransferService::_file = File::None;
 bool BinaryFileTransferService::_failed = false;
 bool BinaryFileTransferService::_cleanup = false;
 bool BinaryFileTransferService::_transportReady = false;
+bool BinaryFileTransferService::_fileResultMissing = false;
 bool BinaryFileTransferService::_compression = false;
 char BinaryFileTransferService::_error[128] = {};
 char BinaryFileTransferService::_line[kLineCapacity] = {};
@@ -212,6 +215,9 @@ void BinaryFileTransferService::lineReceived() {
     return;
   }
   if (startsWith(_line, "rs") && sequence(_line + 2, n)) {
+    // A resend request for the previous packet may arrive while recovering
+    // with SYNC. Its sequence is no longer authoritative; the SYNC reply is.
+    if (_waitingSync) return;
     if (_waiting && !_acked && n == _pendingSync)
       _resend = true;
     else {
@@ -257,7 +263,8 @@ void BinaryFileTransferService::lineReceived() {
       _compression =
           strcmp(_line, "PFT:version:0.1.0:compression:heatshrink,8,4") == 0;
     result = Reply::Version;
-  } else if (strcmp(_line, "PFT:fail") == 0)
+  } else if (strcmp(_line, "PFT:fail") == 0 ||
+             strcmp(_line, "PTF:fail") == 0)
     result = Reply::Fail;
   else if (strcmp(_line, "PFT:busy") == 0)
     result = Reply::Busy;
@@ -305,21 +312,26 @@ bool BinaryFileTransferService::writeAll(const uint8_t* data, size_t size) {
   fail("Unable to write complete BFT packet");
   return false;
 }
-bool BinaryFileTransferService::ascii(const char* command,
-                                      AsciiReply expected) {
+bool BinaryFileTransferService::asciiAttempt(const char* command,
+                                             AsciiReply expected,
+                                             uint32_t timeout) {
   poll();
   _asciiExpected = expected;
   _asciiMarker = _asciiOk = false;
   const bool written =
       writeAll(reinterpret_cast<const uint8_t*>(command), strlen(command));
   const uint32_t start = millis();
-  while (written && millis() - start < kResponseTimeout) {
+  while (written && _mode != Mode::Unknown && millis() - start < timeout) {
     poll();
     if (_asciiOk) break;
     ESP3DHal::wait(1);
   }
   _asciiExpected = AsciiReply::None;
-  if (!_asciiOk || _mode == Mode::Unknown) {
+  return _asciiOk && _mode != Mode::Unknown;
+}
+bool BinaryFileTransferService::ascii(const char* command,
+                                      AsciiReply expected) {
+  if (!asciiAttempt(command, expected, kResponseTimeout)) {
     const char* step = "command";
     if (expected == AsciiReply::Firmware)
       step = "M115";
@@ -334,7 +346,7 @@ bool BinaryFileTransferService::ascii(const char* command,
   }
   return true;
 }
-bool BinaryFileTransferService::synchronize() {
+bool BinaryFileTransferService::synchronize(const char* phase) {
   if (_cleanup && !_transportReady) {
     // A short UART write may have left Marlin halfway through a frame.
     // Let its 500 ms inter-byte timeout finish before sending a new token.
@@ -344,28 +356,55 @@ bool BinaryFileTransferService::synchronize() {
       ESP3DHal::wait(1);
     }
   }
-  poll();
-  if (_mode != Mode::Binary) return false;
-  const uint8_t packet[] = {0xad, 0xb5, 0, 1, 0, 0, 1, 3};
+  // Mark the transition before draining UART: a delayed rs for the packet
+  // that led us here must not invalidate the recovery handshake.
   _waitingSync = true;
   _gotSync = false;
+  poll();
+  if (_mode != Mode::Binary) {
+    _waitingSync = false;
+    return false;
+  }
+  const uint8_t packet[] = {0xad, 0xb5, 0, 1, 0, 0, 1, 3};
   // Allow cleanup to recover numbering after rs/fe, never the file outcome.
   _transportReady = true;
-  const bool written = writeAll(packet, sizeof(packet));
   const uint32_t start = millis();
-  while (written && _transportReady && millis() - start < kResponseTimeout) {
+  uint32_t lastSend = start;
+  uint8_t attempts = 0;
+  while (_transportReady && millis() - start < kResponseTimeout) {
+    // SYNC is sequence-independent and has no file side effect. A lost
+    // request or ss reply can be retried within the same 5-second deadline.
+    // Leave more than Marlin's 500 ms partial-frame timeout between attempts.
+    if (attempts == 0 ||
+        (attempts < 3 && millis() - lastSend >= 750)) {
+      if (!writeAll(packet, sizeof(packet))) break;
+      lastSend = millis();
+      ++attempts;
+    }
     poll();
     if (_gotSync) break;
     ESP3DHal::wait(1);
   }
   _waitingSync = false;
-  _transportReady = written && _gotSync && _transportReady;
-  if (!_transportReady) fail("Marlin BFT SYNC failed");
+  _transportReady = _gotSync && _transportReady;
+  if (!_transportReady) {
+    char error[96];
+    if (strcmp(phase, "packet recovery") == 0)
+      snprintf(error, sizeof(error),
+               "Marlin BFT SYNC failed during %s (packet %u, sync %u)",
+               phase, static_cast<unsigned>(_packet[3]),
+               static_cast<unsigned>(_pendingSync));
+    else
+      snprintf(error, sizeof(error), "Marlin BFT SYNC failed during %s",
+               phase);
+    fail(error);
+  }
   return _transportReady;
 }
 bool BinaryFileTransferService::sendPacket(uint8_t protocol, uint8_t type,
                                            const uint8_t* payload, size_t size,
-                                           Reply expected) {
+                                           Reply expected,
+                                           bool retryMissingQueryResult) {
   poll();
   if ((!_cleanup && _failed) || !_transportReady || !active() ||
       size > _payloadSize || size > kPacketPayloadCapacity ||
@@ -394,6 +433,10 @@ bool BinaryFileTransferService::sendPacket(uint8_t protocol, uint8_t type,
     if (_packet[i] == 0xad && _packet[i + 1] == 0xb5) retrySafe = false;
   _pendingSync = _sync;
   _expected = expected;
+  const uint32_t resultTimeout =
+      protocol == 1 && (type == 1 || type == 2 || type == 4)
+          ? kFileResultTimeout
+          : kResponseTimeout;
   auto sendAndWait = [&]() {
     _reply = Reply::None;
     _acked = _resend = false;
@@ -408,7 +451,7 @@ bool BinaryFileTransferService::sendPacket(uint8_t protocol, uint8_t type,
       const uint32_t elapsed = millis() - sentAt;
       if (_acked) {
         // Duplicate packets cannot recover a lost PFT result.
-        if (elapsed >= kResponseTimeout) break;
+        if (elapsed >= resultTimeout) break;
       } else if (_resend || elapsed >= kAckTimeout) {
         // rs of the current sequence explicitly says the packet was not
         // accepted.
@@ -429,13 +472,14 @@ bool BinaryFileTransferService::sendPacket(uint8_t protocol, uint8_t type,
     // safe recovery point after an ACK loss: nextSync proves the packet was
     // accepted, while pendingSync proves it was not and can be sent again.
     const uint8_t nextSync = static_cast<uint8_t>(_pendingSync + 1);
-    if (expected != Reply::None && _reply == expected && synchronize() &&
+    if (expected != Reply::None && _reply == expected &&
+        synchronize("packet recovery") &&
         _sync == nextSync)
       return true;
     if (protocol == 1 && type == 3) {
       for (uint8_t recovery = 0;
            !_acked && recovery < kMaxRetries && !_failed; ++recovery) {
-        if (!synchronize()) break;
+        if (!synchronize("packet recovery")) break;
         if (_sync == nextSync) return true;
         if (_sync != _pendingSync) break;
         sent = sendAndWait();
@@ -454,7 +498,19 @@ bool BinaryFileTransferService::sendPacket(uint8_t protocol, uint8_t type,
     return false;
   }
   if (expected != Reply::None && _reply == Reply::None) {
-    fail("BFT file result missing; result unknown");
+    // Marlin ACKs QUERY before printing its version. If only that line was
+    // lost, a fresh QUERY is safe: it has no file or decoder side effects.
+    // The second request gets a new sequence number; never replay a WRITE.
+    if (protocol == 1 && type == 0 && retryMissingQueryResult &&
+        _transportReady && !_failed)
+      return sendPacket(1, 0, nullptr, 0, Reply::Version, false);
+    _fileResultMissing = true;
+    char error[96];
+    snprintf(error, sizeof(error),
+             "BFT result missing for packet %u, sync %u; result unknown",
+             static_cast<unsigned>((protocol << 4) | type),
+             static_cast<unsigned>(_pendingSync));
+    fail(error);
     return false;
   }
   return sent && _transportReady && (_reply == expected) &&
@@ -468,11 +524,13 @@ void BinaryFileTransferService::release() {
   _active = false;
   unlockRx();
   esp3d_serial_service.releaseExclusive();
+  _fileResultMissing = false;
 }
 bool BinaryFileTransferService::begin(const char* filename) {
   // A second caller must never abort or reset another caller's transfer.
   if (active()) return false;
   _failed = _cleanup = false;
+  _fileResultMissing = false;
   _compression = false;
   _writeBytesSinceBarrier = 0;
   heatshrink_encoder_reset(&encoder);
@@ -519,7 +577,7 @@ bool BinaryFileTransferService::begin(const char* filename) {
     return false;
   }
   _mode = Mode::Binary;
-  if (!synchronize() || !query()) return false;
+  if (!synchronize("entry") || !query()) return false;
   const size_t length = strlen(filename);
   if (length + 3 > _payloadSize) {
     fail("Filename exceeds Marlin BFT buffer");
@@ -610,15 +668,24 @@ bool BinaryFileTransferService::leave() {
     _mode = Mode::Unknown;
     return false;
   }
-  // receive() in the supplied Marlin can keep scanning for 20 ms after ACK.
-  ESP3DHal::wait(50);
-  if (!ascii("M115\n", AsciiReply::Firmware)) {
-    _mode = Mode::Unknown;
-    return false;
+  // The CLOSE ACK precedes Marlin switching its parser back to ASCII.
+  // A command sent during that transition can be consumed as binary data.
+  ESP3DHal::wait(100);
+  bool confirmed = asciiAttempt("M115\n", AsciiReply::Firmware, 2000);
+  if (!confirmed && _mode == Mode::Leaving && _transportReady) {
+    ESP3DHal::wait(200);
+    confirmed = asciiAttempt("M115\n", AsciiReply::Firmware,
+                             kResponseTimeout);
   }
-  _mode = Mode::Ascii;
-  release();
-  return true;
+  if (!confirmed) fail("Marlin M115 handshake timed out after BFT close");
+  // A confirmed CONTROL/CLOSE ACK means Marlin accepted the mode switch.
+  // Keep the upload failed if M115 was lost, but let normal UART traffic
+  // resume instead of reserving the printer indefinitely.
+  if (_mode == Mode::Leaving) {
+    _mode = Mode::Ascii;
+    release();
+  }
+  return confirmed;
 }
 bool BinaryFileTransferService::finish() {
   if (!idle()) return false;
@@ -645,7 +712,14 @@ bool BinaryFileTransferService::finish() {
   return closed && leave();
 }
 bool BinaryFileTransferService::startPrint(const char* filename) {
-  if (active() || !filename || !*filename) return false;
+  if (active()) {
+    fail("Printer UART is busy");
+    return false;
+  }
+  if (!filename || !*filename) {
+    fail("Invalid print filename");
+    return false;
+  }
   char select[128];
   const int selectLength =
       snprintf(select, sizeof(select), "M23 %s\n", filename);
@@ -672,11 +746,19 @@ bool BinaryFileTransferService::startPrint(const char* filename) {
   // Keep the commands in separate request/response rounds. Otherwise the
   // `ok` for M21 can be mistaken for the M23 acknowledgement and M24 starts
   // the previously selected file (or no file at all).
-  const bool mounted = ascii("M21\n", AsciiReply::Ok);
+  // FILE/CLOSE releases Marlin's SD card. Mounting a slow card can take much
+  // longer than an ordinary G-code acknowledgement.
+  const bool mounted = asciiAttempt("M21\n", AsciiReply::Ok,
+                                    kFileResultTimeout);
+  if (!mounted) fail("Marlin M21 mount timed out");
   // Marlin variants have different informational M23 messages, but all
   // terminate the command with `ok`.
-  const bool selected = mounted && ascii(select, AsciiReply::Ok);
+  const bool selected = mounted &&
+                        asciiAttempt(select, AsciiReply::Ok,
+                                     kFileResultTimeout);
+  if (mounted && !selected) fail("Marlin M23 select timed out");
   const bool started = selected && ascii("M24\n", AsciiReply::Ok);
+  if (selected && !started) fail("Marlin M24 start timed out");
   release();
   return started;
 }
@@ -687,8 +769,33 @@ bool BinaryFileTransferService::abort() {
     release();
     return true;
   }
-  if (_mode != Mode::Binary || (_file != File::None && _file != File::Open))
+  if (_mode != Mode::Binary || _file == File::Foreign)
     return false;
+  if (_fileResultMissing &&
+      (_file == File::Unknown || _file == File::Opening ||
+       _file == File::Closing)) {
+    // The ACK proves that Marlin accepted the last file command, but its
+    // outcome is unknown. QUERY is a dispatch barrier: after its response,
+    // leave Marlin idle long enough to abort any file still open. Never send
+    // FILE/ABORT here, since it could delete an already completed upload.
+    _cleanup = true;
+    bool recovered = (_transportReady || synchronize("cleanup")) && query();
+    if (recovered) {
+      const uint32_t start = millis();
+      while (millis() - start < 11000) {
+        poll();
+        ESP3DHal::wait(10);
+      }
+      recovered = _mode == Mode::Binary && _transportReady;
+    }
+    if (recovered) {
+      _file = File::None;
+      recovered = leave();
+    }
+    _cleanup = false;
+    return recovered;
+  }
+  if (_file != File::None && _file != File::Open) return false;
   // An earlier confirmed OPEN is not proof of ownership after Marlin's idle
   // timeout. Never issue its unguarded ABORT in that situation.
   if (_file == File::Open &&
@@ -698,7 +805,7 @@ bool BinaryFileTransferService::abort() {
     return false;
   }
   _cleanup = true;
-  bool recovered = _transportReady || synchronize();
+  bool recovered = _transportReady || synchronize("cleanup");
   if (recovered && _file == File::Open)
     recovered = query();  // drain older file results before cleanup
   if (recovered && _file == File::Open) {
@@ -707,6 +814,8 @@ bool BinaryFileTransferService::abort() {
   }
   if (recovered) recovered = leave();
   _cleanup = false;
+  if (!recovered && _file == File::Unknown && _fileResultMissing)
+    return abort();  // one bounded recovery after a lost FILE/ABORT result
   return recovered;
 }
 #endif
