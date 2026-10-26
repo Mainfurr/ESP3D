@@ -23,7 +23,7 @@
 namespace {
 using namespace OctoPrintJson;
 
-constexpr size_t kMaxKeys = 4;
+constexpr size_t kMaxKeys = 8;
 constexpr size_t kMaxRequests = 2;
 constexpr size_t kKeySize = 32;
 constexpr size_t kTokenSize = 16;
@@ -113,13 +113,11 @@ bool saveKeys() {
   return ok;
 }
 
-// A new key replaces one for the same app, else takes a free slot, else the
-// oldest slot.
+// Every approved key is kept until it is revoked; when all slots are used the
+// oldest key is dropped.
 bool storeKey(const char* app, const char* key) {
   loadKeys();
   size_t slot = kMaxKeys;
-  for (size_t i = 0; i < kMaxKeys && slot == kMaxKeys; ++i)
-    if (keys[i].key[0] && strcmp(keys[i].app, app) == 0) slot = i;
   for (size_t i = 0; i < kMaxKeys && slot == kMaxKeys; ++i)
     if (!keys[i].key[0]) slot = i;
   if (slot == kMaxKeys) {

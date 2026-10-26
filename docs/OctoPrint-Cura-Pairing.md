@@ -50,8 +50,9 @@ A request is approved in either place:
   followed by M0's `ok` before the timeout. A decision made in the WebUI while
   the prompt is up ends it with `M108`.
 
-Keys are 32 hex characters, stored in NVS (namespace `octokeys`, up to 4; a new
-key for the same app name replaces the old one). They work only as
+Keys are 32 hex characters, stored in NVS (namespace `octokeys`, up to 8; every
+approved key stays valid until it is revoked, and the oldest is dropped when
+all slots are used). They work only as
 `X-Api-Key` for the OctoPrint endpoints, with user rights.
 `GET /api/plugin/appkeys` lists them (admin login) and
 `POST /api/plugin/appkeys` `{"command":"revoke","id":N}` removes one. The WebUI
