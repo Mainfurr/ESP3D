@@ -39,6 +39,9 @@
 #define WIFI_FEATURE
 #define HTTP_FEATURE
 #define TELNET_FEATURE
+// Require a login for the web UI, WebSocket, Telnet and the OctoPrint API.
+// Default passwords are admin/admin and user/user: change them with [ESP550]/[ESP555].
+#define AUTHENTICATION_FEATURE
 #define NOTIFICATION_FEATURE
 #define NOTIFICATION_ESP_ONLINE "Hi, %ESP_NAME% is now online at %ESP_IP%"
 #define ESP_NOTIFICATION_TITLE "ESP3D Notification"

@@ -9,6 +9,7 @@
 #include <strings.h>
 
 #include "../../../core/esp3d_log.h"
+#include "../../authentication/authentication_service.h"
 #include "../../bft/binary_file_transfer_service.h"
 #include "octoprint-upload.h"
 
@@ -552,6 +553,26 @@ String jsonError(const char* error) {
   return body;
 }
 
+constexpr char kApiKeyHeader[] = "X-Api-Key";
+constexpr char kAuthError[] = "Invalid or missing API key";
+
+// OctoPrint clients authenticate with X-Api-Key. Accept the ESP3D admin or
+// user password there. Without AUTHENTICATION_FEATURE every request is admin.
+bool apiKeyAuthorized(const String& apiKey) {
+  return apiKey.length() > 0 &&
+         AuthenticationService::getAuthenticatedLevel(apiKey.c_str()) !=
+             ESP3DAuthenticationLevel::guest;
+}
+
+// For requests parsed by the web server: an API key, or an ESP3D login
+// (session cookie or Basic auth), as the other HTTP handlers accept.
+template <typename Server>
+bool requestAuthorized(Server* server) {
+  return apiKeyAuthorized(server->header(kApiKeyHeader)) ||
+         AuthenticationService::getAuthenticatedLevel() !=
+             ESP3DAuthenticationLevel::guest;
+}
+
 }  // namespace
 
 #if defined(ARDUINO_ARCH_ESP8266)
@@ -571,6 +592,7 @@ void sendJson(WiFiClient* client, uint16_t status, const String& body) {
   const char* reason = status == 200   ? "OK"
                        : status == 201 ? "Created"
                        : status == 400 ? "Bad Request"
+                       : status == 403 ? "Forbidden"
                        : status == 408 ? "Request Timeout"
                        : status == 409 ? "Conflict"
                                        : "Internal Server Error";
@@ -593,6 +615,7 @@ ESP8266WebServer::ClientFuture handleUpload(const String& method,
 
   String contentLength;
   String contentType;
+  String apiKey;
   bool chunked = false;
   client->setTimeout(kHttpBodyTimeout);
   while (client->connected()) {
@@ -611,9 +634,18 @@ ESP8266WebServer::ClientFuture handleUpload(const String& method,
       contentLength = value;
     else if (name.equalsIgnoreCase("Content-Type"))
       contentType = value;
+    else if (name.equalsIgnoreCase(kApiKeyHeader))
+      apiKey = value;
     else if (name.equalsIgnoreCase("Transfer-Encoding") &&
              value.indexOf("chunked") >= 0)
       chunked = true;
+  }
+
+  // This hook runs before ESP8266WebServer parses headers, so session cookies
+  // are not available here; only the API key is checked.
+  if (!apiKeyAuthorized(apiKey)) {
+    sendJson(client, 403, jsonError(kAuthError));
+    return ESP8266WebServer::CLIENT_IS_GIVEN;
   }
 
   uint32_t remaining = 0;
@@ -675,6 +707,10 @@ ESP8266WebServer::ClientFuture handleUpload(const String& method,
 
 void handleVersion() {
   esp3d_log("[OCTO] GET /api/version");
+  if (!requestAuthorized(octoServer)) {
+    octoServer->send(403, "application/json", jsonError(kAuthError));
+    return;
+  }
   octoServer->send(200, "application/json",
                    "{\"api\":\"0.1\",\"server\":\"1.11.0\","
                    "\"text\":\"OctoPrint 1.11.0\"}");
@@ -702,6 +738,7 @@ bool requestActive = false;
 bool requestSuccessful = false;
 bool requestFailed = false;
 bool requestBusy = false;
+bool requestUnauthorized = false;
 uint32_t requestStartTime = 0;
 String requestFilename;
 
@@ -722,6 +759,11 @@ void handleUploadBody() {
   if (upload.status == UPLOAD_FILE_START) {
     requestActive = requestSuccessful = requestFailed = false;
     requestBusy = false;
+    requestUnauthorized = !requestAuthorized(octoServer);
+    if (requestUnauthorized) {
+      requestFailed = true;
+      return;
+    }
     requestFilename = upload.filename;
     requestFilename.replace(",", "_");
     requestStartTime = millis();
@@ -768,6 +810,13 @@ void handleUploadBody() {
 }
 
 void sendUploadResult() {
+  // The body handler never sees a request without a file part, so check here
+  // as well before anything can start a print.
+  if (requestUnauthorized || !requestAuthorized(octoServer)) {
+    requestUnauthorized = false;
+    octoServer->send(403, "application/json", jsonError(kAuthError));
+    return;
+  }
   bool success = requestSuccessful && !requestFailed;
   if (success && requestPrintsAfterUpload()) {
     esp3d_log("[OCTO] starting print");
@@ -798,6 +847,10 @@ void sendUploadResult() {
 
 void handleVersion() {
   esp3d_log("[OCTO] GET /api/version");
+  if (!requestAuthorized(octoServer)) {
+    octoServer->send(403, "application/json", jsonError(kAuthError));
+    return;
+  }
   octoServer->send(200, "application/json",
                    "{\"api\":\"0.1\",\"server\":\"1.11.0\","
                    "\"text\":\"OctoPrint 1.11.0\"}");
