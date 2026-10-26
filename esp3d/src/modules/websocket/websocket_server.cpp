@@ -105,6 +105,11 @@ void handle_Websocket_Server_Event(uint8_t num, uint8_t type, uint8_t *payload,
       break;
     case WStype_CONNECTED: {
       websocket_data_server.initAuthentication();
+#if defined(AUTHENTICATION_FEATURE)
+      // The login level is kept per server, not per client, so serve one
+      // client at a time as Telnet does.
+      websocket_data_server.enableOnly(num);
+#endif  // AUTHENTICATION_FEATURE
       esp3d_log_d("[%u] Connected! port %d, %s", num,
                 websocket_data_server.port(), payload);
       websocket_data_server.pushMSG(num, "Welcome to ESP3D-X V1\n");
@@ -426,6 +431,17 @@ void WebSocket_Server::handleV1Binary(uint8_t num, uint8_t *payload, size_t leng
   
   uint8_t *pdata = payload + 4;
   esp3d_log_d("V1 Binary: length=%u, op=%s, plen=%u", length, op, plen);
+
+#if defined(AUTHENTICATION_FEATURE)
+  // File transfer needs a login ([ESP0]pwd=...); a status query does not.
+  if (_auth == ESP3DAuthenticationLevel::guest && strcmp(op, "SR") != 0) {
+    if (strcmp(op, "SU") == 0) {
+      uint8_t resp[5] = {'U', 'S', 1, 0, 'E'};
+      if (_websocket_server) _websocket_server->sendBIN(num, resp, 5);
+    }
+    return;
+  }
+#endif  // AUTHENTICATION_FEATURE
   
   auto close_transfer = [&]() {
     if (_transferState == 'O') return;

@@ -245,7 +245,7 @@ bool HTTP_Server::begin() {
   // Autorization is already added
   // ask server to track these headers
 #ifdef AUTHENTICATION_FEATURE
-  const char* headerkeys[] = {"Cookie", "Content-Length"};
+  const char* headerkeys[] = {"Cookie", "Content-Length", "X-Api-Key"};
 #else
   const char* headerkeys[] = {"Content-Length"};
 #endif

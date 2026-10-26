@@ -1216,6 +1216,18 @@ void ESP3DCommands::process(ESP3DMessage *msg) {
       return;
     }
     lastIsESP3D = false;
+#ifdef AUTHENTICATION_FEATURE
+    // Network clients must log in ([ESP0]pwd=...) before anything reaches
+    // the printer.
+    if (msg->authentication_level == ESP3DAuthenticationLevel::guest &&
+        (msg->origin == ESP3DClientType::telnet ||
+         msg->origin == ESP3DClientType::websocket)) {
+      esp3d_log("Reject guest message from %d", (int)msg->origin);
+      msg->target = msg->origin;
+      dispatchAuthenticationError(msg, 0, false);
+      return;
+    }
+#endif  // AUTHENTICATION_FEATURE
     esp3d_log("Dispatch message: %s", msg->data);
     dispatch(msg);
   }
