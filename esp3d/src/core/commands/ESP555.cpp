@@ -64,6 +64,9 @@ void ESP3DCommands::ESP555(int cmd_params_pos, ESP3DMessage* msg) {
       if (!ESP3DSettings::writeString(ESP_USER_PWD, tmpstr.c_str())) {
         hasError = true;
         error_msg = "Set value failed";
+      } else {
+        // Apply the new password now, not only after a restart.
+        AuthenticationService::update();
       }
     } else {
       hasError = true;
