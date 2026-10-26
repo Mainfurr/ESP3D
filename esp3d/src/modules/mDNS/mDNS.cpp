@@ -49,6 +49,9 @@
 #endif  // WS_DATA_FEATURE
 #include "../../core/esp3d_hal.h"
 #include "../../core/esp3d_string.h"
+#if defined(HTTP_FEATURE)
+#include "../http/handlers/octoprint-api.h"
+#endif  // HTTP_FEATURE
 #if defined(FILESYSTEM_FEATURE)
 #include "../filesystem/esp_filesystem.h"
 #endif  // FILESYSTEM_FEATURE
@@ -217,6 +220,13 @@ void mDNS_Service::addESP3DServices(uint16_t port) {
   MDNS.addService("http", "tcp", HTTP_Server::port());
   if (_port == 0) _port = HTTP_Server::port();
 #endif  // HTTP_FEATURE
+#if defined(HTTP_FEATURE) && defined(OCTOPRINT_STATUS_FEATURE)
+  // Lets Cura's OctoPrint Connection plugin discover the printer.
+  MDNS.addService("octoprint", "tcp", HTTP_Server::port());
+  esp3d_mdns_add_txt("octoprint", "tcp", "path", "/");
+  esp3d_mdns_add_txt("octoprint", "tcp", "api", "0.1");
+  esp3d_mdns_add_txt("octoprint", "tcp", "version", "1.11.0");
+#endif  // HTTP_FEATURE && OCTOPRINT_STATUS_FEATURE
 #if defined(FTP_FEATURE)
   MDNS.addService("ftp", "tcp", ftp_server.ctrlport());
   if (_port == 0) _port = ftp_server.ctrlport();

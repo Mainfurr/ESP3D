@@ -33,6 +33,7 @@
 #include "../authentication/authentication_service.h"
 #if COMMUNICATION_PROTOCOL == RAW_SERIAL && \
     (defined(ARDUINO_ARCH_ESP8266) || defined(ARDUINO_ARCH_ESP32))
+#include "handlers/octoprint-api.h"
 #include "handlers/octoprint-upload.h"
 #endif  // RAW_SERIAL && supported HTTP server
 #include "../filesystem/esp_filesystem.h"
@@ -358,6 +359,9 @@ void HTTP_Server::handle() {
     if (_webserver) {
       _webserver->handleClient();
     }
+#ifdef OCTOPRINT_STATUS_FEATURE
+    OctoPrintApi::handle();
+#endif  // OCTOPRINT_STATUS_FEATURE
   }
 }
 

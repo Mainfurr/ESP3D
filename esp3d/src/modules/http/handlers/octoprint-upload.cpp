@@ -11,6 +11,7 @@
 #include "../../../core/esp3d_log.h"
 #include "../../authentication/authentication_service.h"
 #include "../../bft/binary_file_transfer_service.h"
+#include "octoprint-api.h"
 #include "octoprint-upload.h"
 
 namespace {
@@ -553,13 +554,35 @@ String jsonError(const char* error) {
   return body;
 }
 
+String urlEncode(const String& value) {
+  static constexpr char kHex[] = "0123456789ABCDEF";
+  String out;
+  for (size_t i = 0; i < value.length(); ++i) {
+    const uint8_t c = value.charAt(i);
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' ||
+        c == '~') {
+      out += static_cast<char>(c);
+    } else {
+      out += '%';
+      out += kHex[c >> 4];
+      out += kHex[c & 0x0f];
+    }
+  }
+  return out;
+}
+
 constexpr char kApiKeyHeader[] = "X-Api-Key";
 constexpr char kAuthError[] = "Invalid or missing API key";
 
 // OctoPrint clients authenticate with X-Api-Key. Accept the ESP3D admin or
-// user password there. Without AUTHENTICATION_FEATURE every request is admin.
+// user password there, or a key paired through Application Keys. Without
+// AUTHENTICATION_FEATURE every request is admin.
 bool apiKeyAuthorized(const String& apiKey) {
 #ifdef AUTHENTICATION_FEATURE
+#ifdef OCTOPRINT_APPKEYS_FEATURE
+  if (OctoPrintAppKeys::valid(apiKey)) return true;
+#endif  // OCTOPRINT_APPKEYS_FEATURE
   return apiKey.length() > 0 &&
          AuthenticationService::getAuthenticatedLevel(apiKey.c_str()) !=
              ESP3DAuthenticationLevel::guest;
@@ -734,6 +757,7 @@ void installOctoPrintUpload(ESP8266WebServer* server) {
 #elif defined(ARDUINO_ARCH_ESP32)
 
 #include <WebServer.h>
+#include <WiFi.h>
 
 WebServer* octoServer = nullptr;
 // WebServer parses multipart bodies itself and never invokes RequestHandler::raw
@@ -834,6 +858,11 @@ void sendUploadResult() {
     body += "\",\"path\":\"";
     body += requestFilename;
     body += "\",\"origin\":\"local\"}}}";
+    // Cura derives the file's API path from Location.
+    String host = octoServer->hostHeader();
+    if (host.length() == 0) host = WiFi.localIP().toString();
+    octoServer->sendHeader("Location", "http://" + host + "/api/files/local/" +
+                                           urlEncode(requestFilename));
     octoServer->send(201, "application/json", body);
   } else {
     const char* error = octoUpload.error();
@@ -861,11 +890,20 @@ void handleVersion() {
                    "\"text\":\"OctoPrint 1.11.0\"}");
 }
 
+bool octoPrintApiKeyAuthorized(const String& apiKey) {
+  return apiKeyAuthorized(apiKey);
+}
+
+bool octoPrintRequestAuthorized(WebServer* server) {
+  return requestAuthorized(server);
+}
+
 void installOctoPrintUpload(WebServer* server) {
   octoServer = server;
   server->on("/api/version", HTTP_GET, handleVersion);
   server->on("/api/files/local", HTTP_POST, sendUploadResult,
              handleUploadBody);
+  OctoPrintApi::install(server);
 }
 
 #endif  // platform

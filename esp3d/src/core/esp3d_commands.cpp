@@ -64,6 +64,7 @@ const char *esp3dmsgstr[] = {"head", "core", "tail", "unique"};
 
 #if defined(HTTP_FEATURE)
 #include "../modules/http/http_server.h"
+#include "../modules/http/handlers/octoprint-api.h"
 #endif  // HTTP_FEATURE
 
 #if defined(ESP_LUA_INTERPRETER_FEATURE)
@@ -1216,6 +1217,11 @@ void ESP3DCommands::process(ESP3DMessage *msg) {
       return;
     }
     lastIsESP3D = false;
+#if defined(HTTP_FEATURE) && defined(OCTOPRINT_STATUS_FEATURE)
+    // Follow Marlin's replies for the OctoPrint status and pairing API.
+    if (msg->origin == ESP3DClientType::serial)
+      OctoPrintApi::observeSerial(msg->data, msg->size);
+#endif  // HTTP_FEATURE && OCTOPRINT_STATUS_FEATURE
 #ifdef AUTHENTICATION_FEATURE
     // Network clients must log in ([ESP0]pwd=...) before anything reaches
     // the printer.

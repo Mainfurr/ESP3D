@@ -345,6 +345,14 @@ void ESP3DCommands::ESP400(int cmd_params_pos, ESP3DMessage* msg) {
                   -1, -1, -1, nullptr, true, target, requestId);
 
 #endif  // COMMUNICATION_PROTOCOL
+#if defined(HTTP_FEATURE) && COMMUNICATION_PROTOCOL == RAW_SERIAL && \
+    defined(ARDUINO_ARCH_ESP32)
+  // Let slicers request an OctoPrint API key (Application Keys)
+  dispatchSetting(json, "security/security", ESP_OCTOPRINT_PAIRING,
+                  "slicer pairing", YesNoValues, YesNoLabels,
+                  sizeof(YesNoValues) / sizeof(char*), -1, -1, -1, nullptr,
+                  true, target, requestId);
+#endif  // HTTP_FEATURE && RAW_SERIAL && ESP32
 #endif  // AUTHENTICATION_FEATURE
 #ifdef HTTP_FEATURE
   // HTTP On service/http

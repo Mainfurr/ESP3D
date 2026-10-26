@@ -146,6 +146,7 @@
 #define DEFAULT_SECURE_SERIAL "1"
 #define DEFAULT_BOOT_RADIO_STATE "1"
 #define DEFAULT_STA_FALLBACK_RETRY "0"
+#define DEFAULT_OCTOPRINT_PAIRING "0"
 
 // default int values
 #define DEFAULT_ESP_INT "0"
@@ -206,6 +207,9 @@ uint16_t ESP3DSettingsData[] = {ESP_RADIO_MODE,
                                 ESP_BOOT_RADIO_STATE,
                                 ESP_STA_FALLBACK_MODE,
                                 ESP_STA_FALLBACK_RETRY,
+#if defined(AUTHENTICATION_FEATURE)
+                                ESP_OCTOPRINT_PAIRING,
+#endif  // AUTHENTICATION_FEATURE
                                 ESP_AP_SSID,
                                 ESP_AP_PASSWORD,
                                 ESP_STA_IP_VALUE,
@@ -294,6 +298,12 @@ bool ESP3DSettings::begin() {
     writeByte(ESP_STA_FALLBACK_RETRY, atoi(DEFAULT_STA_FALLBACK_RETRY));
   }
 #endif  // WIFI_FEATURE
+#if defined(AUTHENTICATION_FEATURE)
+  if (!isValidByteSetting(readByte(ESP_OCTOPRINT_PAIRING),
+                          ESP_OCTOPRINT_PAIRING)) {
+    writeByte(ESP_OCTOPRINT_PAIRING, atoi(DEFAULT_OCTOPRINT_PAIRING));
+  }
+#endif  // AUTHENTICATION_FEATURE
   // get target FW
   ESP3DSettings::GetFirmwareTarget(true);
   ESP3DSettings::isVerboseBoot(true);
@@ -975,6 +985,7 @@ bool ESP3DSettings::isValidByteSetting(uint8_t value,
     case ESP_CALIBRATION:
     case ESP_BOOT_RADIO_STATE:
     case ESP_STA_FALLBACK_RETRY:
+    case ESP_OCTOPRINT_PAIRING:
       if (value == (uint8_t)ESP3DState::off ||
           value == (uint8_t)ESP3DState::on) {
         return true;
@@ -1191,6 +1202,7 @@ const ESP3DSettingDescription *ESP3DSettings::getSettingPtr(
     case ESP_BOOT_RADIO_STATE:
     case ESP_STA_FALLBACK_MODE:
     case ESP_STA_FALLBACK_RETRY:
+    case ESP_OCTOPRINT_PAIRING:
     case ESP_ETH_STA_FALLBACK_MODE:
     case ESP_SERIAL_BRIDGE_ON:
     case ESP_STA_IP_MODE:
@@ -1281,6 +1293,7 @@ const ESP3DSettingDescription *ESP3DSettings::getSettingPtr(
     case ESP_ETH_STA_FALLBACK_MODE:
     case ESP_STA_FALLBACK_MODE:
     case ESP_STA_FALLBACK_RETRY:
+    case ESP_OCTOPRINT_PAIRING:
     case ESP_SERIAL_BRIDGE_ON:
     case ESP_ETH_STA_IP_MODE:
     case ESP_STA_IP_MODE:
@@ -1451,6 +1464,9 @@ const ESP3DSettingDescription *ESP3DSettings::getSettingPtr(
       break;
     case ESP_STA_FALLBACK_RETRY:
       setting.default_val = DEFAULT_STA_FALLBACK_RETRY;
+      break;
+    case ESP_OCTOPRINT_PAIRING:
+      setting.default_val = DEFAULT_OCTOPRINT_PAIRING;
       break;
     case ESP_SERIAL_BRIDGE_ON:
       setting.default_val = DEFAULT_SERIAL_BRIDGE_ON;
