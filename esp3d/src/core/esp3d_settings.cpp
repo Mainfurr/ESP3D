@@ -1088,9 +1088,9 @@ bool ESP3DSettings::isValidByteSetting(uint8_t value,
 #ifdef ETH_FEATURE
     case ESP_ETH_STA_FALLBACK_MODE:
       if (value == ESP_NO_NETWORK
-#if defined(BT_FEATURE)
+#if defined(BLUETOOTH_FEATURE)
           || value == ESP_BT
-#endif  // BT_FEATURE
+#endif  // BLUETOOTH_FEATURE
       ) {
         return true;
       }
@@ -1101,9 +1101,9 @@ bool ESP3DSettings::isValidByteSetting(uint8_t value,
       if (value == ESP_NO_NETWORK
 
           || value == ESP_AP_SETUP
-#if defined(BT_FEATURE)
+#if defined(BLUETOOTH_FEATURE)
           || value == ESP_BT
-#endif  // BT_FEATURE
+#endif  // BLUETOOTH_FEATURE
       ) {
         return true;
       }
@@ -1113,7 +1113,7 @@ bool ESP3DSettings::isValidByteSetting(uint8_t value,
       return false;
   }
 
-  return true;
+  return false;
 }
 
 uint32_t ESP3DSettings::getDefaultIntegerSetting(
