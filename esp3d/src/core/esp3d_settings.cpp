@@ -301,7 +301,14 @@ bool ESP3DSettings::begin() {
 #if defined(AUTHENTICATION_FEATURE)
   if (!isValidByteSetting(readByte(ESP_OCTOPRINT_PAIRING),
                           ESP_OCTOPRINT_PAIRING)) {
-    writeByte(ESP_OCTOPRINT_PAIRING, atoi(DEFAULT_OCTOPRINT_PAIRING));
+    // First boot after the move: keep the value saved at the old position
+    uint8_t oldPairing = readByte(ESP_OCTOPRINT_PAIRING_OLD);
+    if (isValidByteSetting(oldPairing, ESP_OCTOPRINT_PAIRING)) {
+      writeByte(ESP_OCTOPRINT_PAIRING, oldPairing);
+      writeByte(ESP_OCTOPRINT_PAIRING_OLD, 0xFF);
+    } else {
+      writeByte(ESP_OCTOPRINT_PAIRING, atoi(DEFAULT_OCTOPRINT_PAIRING));
+    }
   }
 #endif  // AUTHENTICATION_FEATURE
   // get target FW

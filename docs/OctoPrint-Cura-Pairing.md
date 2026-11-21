@@ -28,7 +28,8 @@ announces `_octoprint._tcp` over mDNS so Cura can discover it.
 ## Pairing
 
 Off by default: setting **slicer pairing** in Security (`ESP_OCTOPRINT_PAIRING`,
-position 1258), e.g. `[ESP401]P=1258 T=B V=1`.
+position 2040; builds before 2026-11-21 used 1258 and copy it over on first boot), e.g.
+`[ESP401]P=2040 T=B V=1`.
 
 1. `GET /plugin/appkeys/probe` → 204 when pairing is on, else 404.
 2. `POST /plugin/appkeys/request` `{"app":"Cura"}` → 201, `Location` to poll,

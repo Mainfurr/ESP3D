@@ -142,7 +142,12 @@ typedef uint ESP3DSettingIndex;
 #define ESP_ETH_STA_DNS_VALUE     1249  // 4  bytes xxx.xxx.xxx.xxx
 #define ESP_USB_SERIAL_BAUD_RATE   1253  // 4  bytes= int
 #define ESP_STA_FALLBACK_RETRY 1257     // 1 byte = flag
-#define ESP_OCTOPRINT_PAIRING 1258      // 1 byte = flag
+// Mainfurr settings live at the end of the 2 KB settings area so that new
+// upstream settings (which grow up from 1258) never land on them
+#define ESP_OCTOPRINT_PAIRING 2040      // 1 byte = flag
+// Builds before 2026-11-21 kept slicer pairing here; upstream now uses it
+// for ESP_USB_CDC_ON. Only read once, to carry the old value over.
+#define ESP_OCTOPRINT_PAIRING_OLD 1258  // 1 byte = flag
 
 // Hidden password
 #define HIDDEN_PASSWORD "********"
