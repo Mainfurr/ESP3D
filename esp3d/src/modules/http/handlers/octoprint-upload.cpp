@@ -11,6 +11,7 @@
 #include "../../../core/esp3d_log.h"
 #include "../../authentication/authentication_service.h"
 #include "../../bft/binary_file_transfer_service.h"
+#include "../../websocket/websocket_server.h"
 #include "octoprint-api.h"
 #include "octoprint-upload.h"
 
@@ -771,6 +772,22 @@ bool requestUnauthorized = false;
 uint32_t requestStartTime = 0;
 String requestFilename;
 
+// The browser's own upload progress counts bytes handed to its socket, which
+// can run far ahead of what reached the SD card. Report the bytes actually
+// written through BFT on the WebUI websocket ("BFT:<bytes>"). The web server
+// is blocked during the upload, but a websocket send needs no loop service.
+constexpr uint32_t kProgressInterval = 500;
+uint32_t lastProgressReport = 0;
+
+void reportProgress(size_t written, bool force = false) {
+  if (!force && millis() - lastProgressReport < kProgressInterval) return;
+  lastProgressReport = millis();
+  char message[24];
+  snprintf(message, sizeof(message), "BFT:%lu",
+           static_cast<unsigned long>(written));
+  websocket_terminal_server.pushMSG(message);
+}
+
 bool requestPrintsAfterUpload() {
   return octoServer->hasArg("print") &&
          (octoServer->arg("print") == "1" ||
@@ -812,6 +829,7 @@ void handleUploadBody() {
     // start() may replace a rejected long name with the accepted 8.3 alias.
     requestFilename = filename;
     requestActive = true;
+    reportProgress(0, true);
     esp3d_log("[OCTO] upload started");
     return;
   }
@@ -821,6 +839,8 @@ void handleUploadBody() {
          !octoUpload.idle() ||
          !octoUpload.write(upload.buf, upload.currentSize)))
       failUpload();
+    // totalSize is updated after this callback returns.
+    if (requestActive) reportProgress(upload.totalSize + upload.currentSize);
     return;
   }
   if (upload.status == UPLOAD_FILE_END) {
